@@ -1,8 +1,8 @@
 import torch
 from torch.utils.data import DataLoader
 
-from data_processing import CCSNetDataset, get_train_val_files, collect_stats
-from model_fno import DummyModel
+from src.data.data_processing import CCSNetDataset, get_train_val_files, collect_stats
+from src.models.model_fno import DummyModel
 
 
 def run_epoch(model, loader, optimizer=None, device="cpu"):
@@ -61,8 +61,7 @@ def main():
 
     best_loss = float("inf")
 
-        for epoch in range(1, 51):
-
+    for epoch in range(1, 51):
         train_loss = run_epoch(model, train_loader, optimizer=optimizer, device=device)
 
         print(f"Epoch {epoch}: train_loss={train_loss:.6f}")
