@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+
+# Data
+dataset/
+*.vtu
+*.vtk
+*.npz
+*.npy
+
+# Outputs
+figures/
+outputs/
+
+# Environments
+.env
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Models
+*.pt
+*.pth
+checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
