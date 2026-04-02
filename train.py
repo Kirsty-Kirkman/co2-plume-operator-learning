@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.data.data_processing import CCSNetDataset, get_train_val_files, collect_stats
-from src.models.model_fno import DummyModel
+from src.models.model_fno import BaselineCNN
 
 
 def run_epoch(model, loader, optimizer=None, device="cpu"):
@@ -54,7 +54,7 @@ def main():
     # must stay 1 because vertical size varies across samples
     train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
 
-    model = DummyModel().to(device)
+    model = BaselineCNN().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     print("Overfit samples:", len(train_dataset))
@@ -71,11 +71,10 @@ def main():
 
             torch.save(
                 model.state_dict(),
-                "best_dummy_overfit.pt"
+                "checkpoints/best_baseline_overfit.pt"
             )
 
             print("Saved new best model")
-
 
 if __name__ == "__main__":
     main()
