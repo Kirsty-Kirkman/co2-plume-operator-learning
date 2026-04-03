@@ -53,8 +53,8 @@ def main():
     train_dataset = CCSNetDataset(train_files, stats=stats)
     val_dataset = CCSNetDataset(val_files, stats=stats)
 
-    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 
     model = BaselineCNN().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
@@ -81,7 +81,6 @@ def main():
                 "checkpoints/best_baseline_phase1c.pt"
             )
             print("Saved new best validation model")
-
 
 if __name__ == "__main__":
     main()
