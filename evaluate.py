@@ -1,5 +1,8 @@
-import os
 import numpy as np
+import torch
+
+from src.models.model_fno import BaselineCNN
+from src.data.data_processing import collect_stats, get_train_val_files, normalize
 
 
 def r2(x, y):
@@ -17,66 +20,92 @@ def MAE(x, y):
     return np.mean(np.abs(x - y))
 
 
-def predict_sample(data):
-    """
-    Replace this with your actual model inference code.
+def build_input(data, stats):
+    porosity = data["porosity"].astype(np.float32)
+    perm_r = np.log10(data["perm_r"].astype(np.float32) + 1e-12)
+    perm_z = np.log10(data["perm_z"].astype(np.float32) + 1e-12)
 
-    Parameters
-    ----------
-    data : np.lib.npyio.NpzFile
-        One loaded sample from np.load(...)
+    nz, nx = porosity.shape
 
-    Returns
-    -------
-    gas_saturation_pred : np.ndarray
-        Must have the same shape as data["gas_saturation"]
-    pressure_buildup_pred : np.ndarray
-        Must have the same shape as data["pressure_buildup"]
-    """
+    inj_rate = np.full((nz, nx), data["inj_rate"], dtype=np.float32)
+    temperature = np.full((nz, nx), data["temperature"], dtype=np.float32)
+    depth = np.full((nz, nx), data["depth"], dtype=np.float32)
+    swi = np.full((nz, nx), data["Swi"], dtype=np.float32)
+    lam = np.full((nz, nx), data["lam"], dtype=np.float32)
 
-    # Placeholder predictions
-    gas_saturation_pred = np.zeros_like(data["gas_saturation"])
-    pressure_buildup_pred = np.zeros_like(data["pressure_buildup"])
+    perf_mask = np.zeros((nz, nx), dtype=np.float32)
+    z0, z1 = int(data["perf_interval"][0]), int(data["perf_interval"][1])
+    perf_mask[z0:z1 + 1, 0] = 1.0
 
-    return gas_saturation_pred, pressure_buildup_pred
+    porosity = normalize(porosity, stats["porosity"]["mean"], stats["porosity"]["std"])
+    perm_r = normalize(perm_r, stats["perm_r"]["mean"], stats["perm_r"]["std"])
+    perm_z = normalize(perm_z, stats["perm_z"]["mean"], stats["perm_z"]["std"])
+    inj_rate = normalize(inj_rate, stats["inj_rate"]["mean"], stats["inj_rate"]["std"])
+    temperature = normalize(temperature, stats["temperature"]["mean"], stats["temperature"]["std"])
+    depth = normalize(depth, stats["depth"]["mean"], stats["depth"]["std"])
+    swi = normalize(swi, stats["Swi"]["mean"], stats["Swi"]["std"])
+    lam = normalize(lam, stats["lam"]["mean"], stats["lam"]["std"])
 
-
-def evaluate(data_dir="dataset/test_data", n_samples=None):
-    gas_saturation_r2 = []
-    pressure_buildup_r2 = []
-    gas_saturation_MAE = []
-    pressure_buildup_MAE = []
-
-    all_files = sorted(
+    x = np.stack(
         [
-            f for f in os.listdir(data_dir)
-            if f.endswith(".npz")
-        ]
+            porosity,
+            perm_r,
+            perm_z,
+            inj_rate,
+            temperature,
+            depth,
+            swi,
+            lam,
+            perf_mask,
+        ],
+        axis=0,
     )
 
-    if n_samples is None:
-        n_samples = len(all_files)
+    return x
 
-    for idx in range(n_samples):
-        file_path = os.path.join(data_dir, f"data_{str(idx).zfill(4)}.npz")
 
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    all_train_files, all_val_files = get_train_val_files()
+
+    # Keep stats consistent with your training script
+    train_files = all_train_files[:200]
+    val_files = all_val_files[:50]
+
+    stats = collect_stats(train_files, max_files=200)
+
+    model = BaselineCNN().to(device)
+    model.load_state_dict(
+        torch.load("checkpoints/best_baseline_phase1c.pt", map_location=device)
+    )
+    model.eval()
+
+    gas_saturation_r2, pressure_buildup_r2 = [], []
+    gas_saturation_MAE, pressure_buildup_MAE = [], []
+
+    for file_path in val_files:
         with np.load(file_path) as data:
             gas_saturation = data["gas_saturation"]
             pressure_buildup = data["pressure_buildup"]
 
-            gas_saturation_pred, pressure_buildup_pred = predict_sample(data)
+            x = build_input(data, stats)
+            x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(device)
 
-            if gas_saturation_pred.shape != gas_saturation.shape:
-                raise ValueError(
-                    f"gas_saturation_pred has shape {gas_saturation_pred.shape}, "
-                    f"but expected {gas_saturation.shape}"
-                )
+            with torch.no_grad():
+                gas_pred, pressure_pred = model(x_tensor)
 
-            if pressure_buildup_pred.shape != pressure_buildup.shape:
-                raise ValueError(
-                    f"pressure_buildup_pred has shape {pressure_buildup_pred.shape}, "
-                    f"but expected {pressure_buildup.shape}"
-                )
+            gas_pred = gas_pred.squeeze(0).cpu().numpy()            # (24, nz, nx)
+            pressure_pred = pressure_pred.squeeze(0).cpu().numpy()  # (24, nz, nx)
+
+            pressure_pred = (
+                pressure_pred * stats["pressure"]["std"]
+                + stats["pressure"]["mean"]
+            )
+
+            gas_saturation_pred = np.transpose(gas_pred, (1, 2, 0))
+            pressure_buildup_pred = np.transpose(pressure_pred, (1, 2, 0))
 
             gas_saturation_r2.append(r2(gas_saturation, gas_saturation_pred))
             pressure_buildup_r2.append(r2(pressure_buildup, pressure_buildup_pred))
@@ -85,19 +114,12 @@ def evaluate(data_dir="dataset/test_data", n_samples=None):
             pressure_buildup_MAE.append(MAE(pressure_buildup, pressure_buildup_pred))
 
     print("--------------")
-    print(f"Average gas saturation R2 score is: {np.mean(gas_saturation_r2):.6f}")
-    print(f"Average pressure buildup R2 score is: {np.mean(pressure_buildup_r2):.6f}")
+    print(f"Average validation set gas saturation R2 score is: {np.mean(gas_saturation_r2)}")
+    print(f"Average validation set pressure buildup R2 score is: {np.mean(pressure_buildup_r2)}")
     print("--------------")
-    print(f"Average gas saturation MAE is: {np.mean(gas_saturation_MAE):.6f}")
-    print(f"Average pressure buildup MAE is: {np.mean(pressure_buildup_MAE):.6f}")
-
-    return {
-        "gas_saturation_r2": np.mean(gas_saturation_r2),
-        "pressure_buildup_r2": np.mean(pressure_buildup_r2),
-        "gas_saturation_MAE": np.mean(gas_saturation_MAE),
-        "pressure_buildup_MAE": np.mean(pressure_buildup_MAE),
-    }
+    print(f"Average validation set gas saturation MAE is: {np.mean(gas_saturation_MAE)}")
+    print(f"Average validation set pressure buildup MAE is: {np.mean(pressure_buildup_MAE)}")
 
 
 if __name__ == "__main__":
-    evaluate()
+    main()

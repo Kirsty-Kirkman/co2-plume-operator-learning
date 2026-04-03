@@ -4,10 +4,8 @@ import torch.nn as nn
 
 class BaselineCNN(nn.Module):
     """
-    Simple CNN baseline for CO₂ plume prediction.
-
-    This model maps input reservoir/property channels to
-    time-dependent output fields for:
+    CNN baseline for CO₂ plume prediction with a shared encoder
+    and separate output heads for:
     - gas saturation
     - pressure buildup
 
@@ -22,7 +20,8 @@ class BaselineCNN(nn.Module):
     def __init__(self, in_ch=9, hidden=64):
         super().__init__()
 
-        self.net = nn.Sequential(
+        # Shared feature extractor
+        self.encoder = nn.Sequential(
             nn.Conv2d(in_ch, hidden, kernel_size=3, padding=1),
             nn.ReLU(),
 
@@ -34,9 +33,20 @@ class BaselineCNN(nn.Module):
 
             nn.Conv2d(hidden * 2, hidden * 2, kernel_size=3, padding=1),
             nn.ReLU(),
+        )
 
-            # 48 output channels = 24 gas + 24 pressure
-            nn.Conv2d(hidden * 2, 48, kernel_size=3, padding=1),
+        # Gas saturation head
+        self.gas_head = nn.Sequential(
+            nn.Conv2d(hidden * 2, hidden, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(hidden, 24, kernel_size=3, padding=1),
+        )
+
+        # Pressure buildup head
+        self.pressure_head = nn.Sequential(
+            nn.Conv2d(hidden * 2, hidden, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(hidden, 24, kernel_size=3, padding=1),
         )
 
     def forward(self, x):
@@ -56,10 +66,9 @@ class BaselineCNN(nn.Module):
         pressure : torch.Tensor
             Predicted pressure buildup with shape (batch, 24, nz, nx)
         """
-        out = self.net(x)
+        features = self.encoder(x)
 
-        # out shape: (batch, 48, nz, nx)
-        gas = out[:, :24, :, :]
-        pressure = out[:, 24:, :, :]
+        gas = self.gas_head(features)
+        pressure = self.pressure_head(features)
 
         return gas, pressure

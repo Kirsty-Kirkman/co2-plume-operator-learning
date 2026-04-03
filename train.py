@@ -45,26 +45,26 @@ def main():
     all_train_files, all_val_files = get_train_val_files()
 
     # Phase 1C: small-scale baseline run
-    train_files = all_train_files[:200]
-    val_files = all_val_files[:50]
+    train_files = all_train_files[:10]
+    val_files = all_val_files[:10]
 
     stats = collect_stats(train_files, max_files=200)
 
     train_dataset = CCSNetDataset(train_files, stats=stats)
     val_dataset = CCSNetDataset(val_files, stats=stats)
 
-    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False)
 
     model = BaselineCNN().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
 
     print("Train samples:", len(train_dataset))
     print("Val samples:", len(val_dataset))
 
     best_val_loss = float("inf")
 
-    for epoch in range(1, 21):
+    for epoch in range(1, 101):
         train_loss = run_epoch(model, train_loader, optimizer=optimizer, device=device)
         val_loss = run_epoch(model, val_loader, optimizer=None, device=device)
 
