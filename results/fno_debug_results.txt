@@ -1,0 +1,15 @@
+FNO debug experiment (10 train / 10 val)
+
+Gas R2: 0.5961
+Pressure R2: 0.7126
+
+Gas MAE: 0.0587
+Pressure MAE: 8.4495
+
+Model:
+FNO2d with coordinate channels (11 inputs)
+
+Comparison:
+CNN baseline:
+Gas R2: 0.2489
+Pressure R2: 0.2157
