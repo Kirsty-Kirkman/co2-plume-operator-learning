@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.data.data_processing import CCSNetDataset, get_train_val_files, collect_stats
-from src.models.model_fno import BaselineCNN
+from src.models.fno_model import FNO2d
 
 
 def run_epoch(model, loader, optimizer=None, device="cpu"):
@@ -44,7 +44,7 @@ def main():
 
     all_train_files, all_val_files = get_train_val_files()
 
-    # Phase 1C: small-scale baseline run
+    # Small debug run first
     train_files = all_train_files[:10]
     val_files = all_val_files[:10]
 
@@ -56,11 +56,24 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 
-    model = BaselineCNN().to(device)
+    model = FNO2d(in_ch=11).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
 
     print("Train samples:", len(train_dataset))
     print("Val samples:", len(val_dataset))
+
+    # Forward-pass sanity check
+    x, gas, pressure = next(iter(train_loader))
+    x = x.to(device)
+
+    with torch.no_grad():
+        gas_pred, pressure_pred = model(x)
+
+    print("Gas prediction shape:", gas_pred.shape)
+    print("Pressure prediction shape:", pressure_pred.shape)
+    print("Target gas shape:", gas.shape)
+    print("Target pressure shape:", pressure.shape)
+    print("-------------------------------")
 
     best_val_loss = float("inf")
 
@@ -78,9 +91,10 @@ def main():
             best_val_loss = val_loss
             torch.save(
                 model.state_dict(),
-                "checkpoints/best_baseline_phase1c.pt"
+                "checkpoints/fno_coords.pt"
             )
             print("Saved new best validation model")
+
 
 if __name__ == "__main__":
     main()

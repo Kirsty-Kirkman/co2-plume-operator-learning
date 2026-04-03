@@ -1,8 +1,13 @@
 import numpy as np
 import torch
 
-from src.models.model_fno import BaselineCNN
-from src.data.data_processing import collect_stats, get_train_val_files, normalize
+from src.models.fno_model import FNO2d
+from src.data.data_processing import (
+    collect_stats,
+    get_train_val_files,
+    normalize,
+    build_coordinate_channels,
+)
 
 
 def r2(x, y):
@@ -37,6 +42,8 @@ def build_input(data, stats):
     z0, z1 = int(data["perf_interval"][0]), int(data["perf_interval"][1])
     perf_mask[z0:z1 + 1, 0] = 1.0
 
+    z_channel, r_channel = build_coordinate_channels(nz, nx)
+
     porosity = normalize(porosity, stats["porosity"]["mean"], stats["porosity"]["std"])
     perm_r = normalize(perm_r, stats["perm_r"]["mean"], stats["perm_r"]["std"])
     perm_z = normalize(perm_z, stats["perm_z"]["mean"], stats["perm_z"]["std"])
@@ -57,6 +64,8 @@ def build_input(data, stats):
             swi,
             lam,
             perf_mask,
+            z_channel,
+            r_channel,
         ],
         axis=0,
     )
@@ -70,15 +79,15 @@ def main():
 
     all_train_files, all_val_files = get_train_val_files()
 
-    # Keep stats consistent with your training script
-    train_files = all_train_files[:200]
-    val_files = all_val_files[:50]
+    # Keep these aligned with the training run that produced fno_coords.pt
+    train_files = all_train_files[:10]
+    val_files = all_val_files[:10]
 
     stats = collect_stats(train_files, max_files=200)
 
-    model = BaselineCNN().to(device)
+    model = FNO2d(in_ch=11).to(device)
     model.load_state_dict(
-        torch.load("checkpoints/best_baseline_phase1c.pt", map_location=device)
+        torch.load("checkpoints/fno_coords.pt", map_location=device)
     )
     model.eval()
 
@@ -96,8 +105,8 @@ def main():
             with torch.no_grad():
                 gas_pred, pressure_pred = model(x_tensor)
 
-            gas_pred = gas_pred.squeeze(0).cpu().numpy()            # (24, nz, nx)
-            pressure_pred = pressure_pred.squeeze(0).cpu().numpy()  # (24, nz, nx)
+            gas_pred = gas_pred.squeeze(0).cpu().numpy()
+            pressure_pred = pressure_pred.squeeze(0).cpu().numpy()
 
             pressure_pred = (
                 pressure_pred * stats["pressure"]["std"]

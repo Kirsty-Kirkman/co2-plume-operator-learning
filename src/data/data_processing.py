@@ -5,10 +5,14 @@ import torch
 from torch.utils.data import Dataset
 
 
-def collect_stats(files, max_files=200):
+def collect_stats(files, max_files=200, seed=42):
     """
     Compute simple global mean/std stats from a subset of training files.
+    Coordinate channels and perf_mask are not normalized.
     """
+    files = files.copy()
+    rng = random.Random(seed)
+    rng.shuffle(files)
     files = files[:max_files]
 
     sums = {
@@ -68,6 +72,26 @@ def normalize(arr, mean, std):
     return (arr - mean) / (std + 1e-8)
 
 
+def build_coordinate_channels(nz, nx):
+    """
+    Build normalized coordinate channels in [0, 1].
+
+    Returns
+    -------
+    z_channel : np.ndarray
+        Shape (nz, nx), vertical coordinate
+    r_channel : np.ndarray
+        Shape (nz, nx), radial coordinate
+    """
+    z_coords = np.linspace(0.0, 1.0, nz, dtype=np.float32)[:, None]
+    r_coords = np.linspace(0.0, 1.0, nx, dtype=np.float32)[None, :]
+
+    z_channel = np.repeat(z_coords, nx, axis=1)
+    r_channel = np.repeat(r_coords, nz, axis=0)
+
+    return z_channel, r_channel
+
+
 def load_sample(file_path, stats=None):
     with np.load(file_path) as data:
         porosity = data["porosity"].astype(np.float32)
@@ -85,6 +109,8 @@ def load_sample(file_path, stats=None):
         perf_mask = np.zeros((nz, nx), dtype=np.float32)
         z0, z1 = int(data["perf_interval"][0]), int(data["perf_interval"][1])
         perf_mask[z0:z1 + 1, 0] = 1.0
+
+        z_channel, r_channel = build_coordinate_channels(nz, nx)
 
         if stats is not None:
             porosity = normalize(porosity, stats["porosity"]["mean"], stats["porosity"]["std"])
@@ -107,6 +133,8 @@ def load_sample(file_path, stats=None):
                 swi,
                 lam,
                 perf_mask,
+                z_channel,
+                r_channel,
             ],
             axis=0,
         )
@@ -124,6 +152,14 @@ def load_sample(file_path, stats=None):
                 stats["pressure"]["mean"],
                 stats["pressure"]["std"]
             )
+
+        assert x.shape == (11, nz, nx)
+        assert gas.shape == (24, nz, nx)
+        assert pressure.shape == (24, nz, nx)
+
+        assert np.isfinite(x).all(), "Non-finite values in input tensor"
+        assert np.isfinite(gas).all(), "Non-finite values in gas target"
+        assert np.isfinite(pressure).all(), "Non-finite values in pressure target"
 
         return (
             torch.tensor(x, dtype=torch.float32),
