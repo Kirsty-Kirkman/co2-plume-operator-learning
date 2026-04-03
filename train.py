@@ -1,3 +1,4 @@
+import os
 import torch
 from torch.utils.data import DataLoader
 
@@ -24,8 +25,6 @@ def run_epoch(model, loader, optimizer=None, device="cpu"):
 
             loss_gas = torch.mean(torch.abs(gas_pred - gas))
             loss_pressure = torch.mean(torch.abs(pressure_pred - pressure))
-
-            # weight them equally for now
             loss = loss_gas + loss_pressure
 
             if training:
@@ -41,40 +40,48 @@ def main():
     device = torch.device("cpu")
     print("Using device:", device)
 
-    train_files, _ = get_train_val_files()
+    os.makedirs("checkpoints", exist_ok=True)
 
-    # overfit test: 10 samples only
-    overfit_files = train_files[:10]
+    all_train_files, all_val_files = get_train_val_files()
 
-    # compute normalization stats from these 10 files for the overfit test
-    stats = collect_stats(overfit_files, max_files=10)
+    # Phase 1C: small-scale baseline run
+    train_files = all_train_files[:200]
+    val_files = all_val_files[:50]
 
-    train_dataset = CCSNetDataset(overfit_files, stats=stats)
+    stats = collect_stats(train_files, max_files=200)
 
-    # must stay 1 because vertical size varies across samples
+    train_dataset = CCSNetDataset(train_files, stats=stats)
+    val_dataset = CCSNetDataset(val_files, stats=stats)
+
     train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 
     model = BaselineCNN().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    print("Overfit samples:", len(train_dataset))
+    print("Train samples:", len(train_dataset))
+    print("Val samples:", len(val_dataset))
 
-    best_loss = float("inf")
+    best_val_loss = float("inf")
 
-    for epoch in range(1, 51):
+    for epoch in range(1, 21):
         train_loss = run_epoch(model, train_loader, optimizer=optimizer, device=device)
+        val_loss = run_epoch(model, val_loader, optimizer=None, device=device)
 
-        print(f"Epoch {epoch}: train_loss={train_loss:.6f}")
+        print(
+            f"Epoch {epoch}: "
+            f"train_loss={train_loss:.6f}, "
+            f"val_loss={val_loss:.6f}"
+        )
 
-        if train_loss < best_loss:
-            best_loss = train_loss
-
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             torch.save(
                 model.state_dict(),
-                "checkpoints/best_baseline_overfit.pt"
+                "checkpoints/best_baseline_phase1c.pt"
             )
+            print("Saved new best validation model")
 
-            print("Saved new best model")
 
 if __name__ == "__main__":
     main()
