@@ -44,9 +44,9 @@ def main():
 
     all_train_files, all_val_files = get_train_val_files()
 
-    # Small debug run first
-    train_files = all_train_files[:10]
-    val_files = all_val_files[:10]
+    # First meaningful FNO experiment
+    train_files = all_train_files[:200]
+    val_files = all_val_files[:50]
 
     stats = collect_stats(train_files, max_files=200)
 
@@ -76,8 +76,10 @@ def main():
     print("-------------------------------")
 
     best_val_loss = float("inf")
+    best_checkpoint_path = "checkpoints/fno_coords_200_best.pt"
+    last_checkpoint_path = "checkpoints/fno_coords_200_last.pt"
 
-    for epoch in range(1, 101):
+    for epoch in range(1, 31):
         train_loss = run_epoch(model, train_loader, optimizer=optimizer, device=device)
         val_loss = run_epoch(model, val_loader, optimizer=None, device=device)
 
@@ -89,11 +91,15 @@ def main():
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(
-                model.state_dict(),
-                "checkpoints/fno_coords.pt"
-            )
-            print("Saved new best validation model")
+            torch.save(model.state_dict(), best_checkpoint_path)
+            print(f"Saved new best validation model to {best_checkpoint_path}")
+
+        torch.save(model.state_dict(), last_checkpoint_path)
+
+    print("-------------------------------")
+    print(f"Best validation loss: {best_val_loss:.6f}")
+    print(f"Best checkpoint: {best_checkpoint_path}")
+    print(f"Last checkpoint: {last_checkpoint_path}")
 
 
 if __name__ == "__main__":

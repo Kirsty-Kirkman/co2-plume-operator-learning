@@ -79,15 +79,15 @@ def main():
 
     all_train_files, all_val_files = get_train_val_files()
 
-    # Keep these aligned with the training run that produced fno_coords.pt
-    train_files = all_train_files[:10]
-    val_files = all_val_files[:10]
+    # Keep these aligned with the training run that produced fno_coords_200_best.pt
+    train_files = all_train_files[:200]
+    val_files = all_val_files[:50]
 
     stats = collect_stats(train_files, max_files=200)
 
     model = FNO2d(in_ch=11).to(device)
     model.load_state_dict(
-        torch.load("checkpoints/fno_coords.pt", map_location=device)
+        torch.load("checkpoints/fno_coords_200_best.pt", map_location=device)
     )
     model.eval()
 
