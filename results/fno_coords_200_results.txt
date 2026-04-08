@@ -1,0 +1,36 @@
+FNO experiment: coordinate channels
+
+Model:
+FNO2d (in_ch=11)
+Spectral operator with coordinate channels
+
+Dataset:
+Train samples: 200
+Validation samples: 50
+
+Training:
+Epochs: 30
+Optimizer: Adam
+Learning rate: 5e-4
+Loss: L1 gas + L1 pressure
+
+Results:
+
+Gas saturation:
+R²: 0.7789
+MAE: 0.0301
+
+Pressure buildup:
+R²: 0.8374
+MAE: 5.2273
+
+Best validation loss:
+0.228570 (epoch 23)
+
+Checkpoints:
+checkpoints/fno_coords_200_best.pt
+checkpoints/fno_coords_200_last.pt
+
+Notes:
+FNO significantly outperforms CNN baseline.
+Coordinate channels improve spatial learning on radial grid.
