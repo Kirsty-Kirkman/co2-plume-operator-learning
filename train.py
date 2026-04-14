@@ -18,8 +18,57 @@ def calculate_r2(pred, target):
     return 1.0 - (ss_res / ss_tot)
 
 
+def run_epoch(model, loader, criterion, device, optimizer=None):
+    is_train = optimizer is not None
+
+    if is_train:
+        model.train()
+    else:
+        model.eval()
+
+    total_loss = 0.0
+    total_gas_loss = 0.0
+    total_pres_loss = 0.0
+    total_gas_r2 = 0.0
+    total_pres_r2 = 0.0
+
+    for x, gas_true, pres_true in loader:
+        x = x.to(device)
+        gas_true = gas_true.to(device)
+        pres_true = pres_true.to(device)
+
+        if is_train:
+            optimizer.zero_grad()
+
+        with torch.set_grad_enabled(is_train):
+            gas_pred, pres_pred = model(x)
+
+            gas_loss = criterion(gas_pred, gas_true)
+            pres_loss = criterion(pres_pred, pres_true)
+            loss = gas_loss + pres_loss
+
+            if is_train:
+                loss.backward()
+                optimizer.step()
+
+        total_loss += loss.item()
+        total_gas_loss += gas_loss.item()
+        total_pres_loss += pres_loss.item()
+        total_gas_r2 += calculate_r2(gas_pred, gas_true)
+        total_pres_r2 += calculate_r2(pres_pred, pres_true)
+
+    n = len(loader)
+    return {
+        "loss": total_loss / n,
+        "gas_loss": total_gas_loss / n,
+        "pres_loss": total_pres_loss / n,
+        "gas_r2": total_gas_r2 / n,
+        "pres_r2": total_pres_r2 / n,
+    }
+
+
 def train():
-    print(">>> CHECKPOINT-SAVING TRAIN.PY IS RUNNING <<<")
+    print(">>> COLAB GENERALISATION TRAIN.PY IS RUNNING <<<")
 
     torch.manual_seed(0)
     np.random.seed(0)
@@ -28,30 +77,35 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
 
-    all_files = sorted(glob.glob("dataset/train_data/*.npz"))
-    if len(all_files) == 0:
-        print("Error: No .npz files found in dataset/train_data/")
+    data_path = os.getenv("DATA_PATH", "dataset/train_data/*.npz")
+    all_files = sorted(glob.glob(data_path))
+
+    print(f"Using data path: {data_path}")
+    print(f"Found {len(all_files)} files")
+
+    if len(all_files) < 70:
+        print("Error: Need at least 70 files for 50/10/10 split.")
         return
 
     target_z = 51
 
-    # Overfit sanity check subset
-    train_files = all_files[:8]
-    print(f"Collecting statistics on {len(train_files)} files...")
+    train_files = all_files[:50]
+    val_files = all_files[50:60]
+    test_files = all_files[60:70]
+
+    print(f"Train: {len(train_files)} | Val: {len(val_files)} | Test: {len(test_files)}")
     print(f"Resampling all samples to Z = {target_z}")
 
+    # Fit normalizer on train files only
     normalizer = collect_stats(train_files, target_z=target_z)
-    train_dataset = CCSNetDataset(
-        train_files,
-        normalizer=normalizer,
-        target_z=target_z,
-    )
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=2,
-        shuffle=False,
-        num_workers=0,
-    )
+
+    train_dataset = CCSNetDataset(train_files, normalizer=normalizer, target_z=target_z)
+    val_dataset = CCSNetDataset(val_files, normalizer=normalizer, target_z=target_z)
+    test_dataset = CCSNetDataset(test_files, normalizer=normalizer, target_z=target_z)
+
+    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=0)
 
     sample_x, sample_gas, sample_pres = train_dataset[0]
     print("Sample x shape:", sample_x.shape)
@@ -63,80 +117,58 @@ def train():
 
     model = FNO3d(in_ch=11, width=32).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=50,
-        gamma=0.5,
-    )
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
     criterion = nn.MSELoss()
 
-    best_loss = float("inf")
+    best_val_loss = float("inf")
 
     print("Starting Training Loop...")
-    for epoch in range(1, 201):
-        model.train()
-
-        total_loss = 0.0
-        total_gas_loss = 0.0
-        total_pres_loss = 0.0
-        g_r2_acc = 0.0
-        p_r2_acc = 0.0
-
-        for x, gas_true, pres_true in train_loader:
-            x = x.to(device)
-            gas_true = gas_true.to(device)
-            pres_true = pres_true.to(device)
-
-            optimizer.zero_grad()
-
-            gas_pred, pres_pred = model(x)
-
-            gas_loss = criterion(gas_pred, gas_true)
-            pres_loss = criterion(pres_pred, pres_true)
-            loss = gas_loss + pres_loss
-
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            total_gas_loss += gas_loss.item()
-            total_pres_loss += pres_loss.item()
-            g_r2_acc += calculate_r2(gas_pred, gas_true)
-            p_r2_acc += calculate_r2(pres_pred, pres_true)
+    for epoch in range(1, 101):
+        train_metrics = run_epoch(model, train_loader, criterion, device, optimizer=optimizer)
+        val_metrics = run_epoch(model, val_loader, criterion, device, optimizer=None)
 
         scheduler.step()
-
-        avg_loss = total_loss / len(train_loader)
-        avg_gas_loss = total_gas_loss / len(train_loader)
-        avg_pres_loss = total_pres_loss / len(train_loader)
-        avg_g = g_r2_acc / len(train_loader)
-        avg_p = p_r2_acc / len(train_loader)
         current_lr = optimizer.param_groups[0]["lr"]
 
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            torch.save(model.state_dict(), "checkpoints/fno3d_overfit_best.pt")
+        if val_metrics["loss"] < best_val_loss:
+            best_val_loss = val_metrics["loss"]
+            torch.save(model.state_dict(), "checkpoints/fno3d_generalisation_best.pt")
             normalizer.save("checkpoints/normalizer.pkl")
-            print(f"New best model saved at epoch {epoch:03d}")
+            print(f"New best validation model saved at epoch {epoch:03d}")
 
         if epoch % 5 == 0 or epoch == 1:
             print(
                 f"Epoch {epoch:03d} | "
                 f"LR: {current_lr:.6e} | "
-                f"Loss: {avg_loss:.6f} | "
-                f"GasLoss: {avg_gas_loss:.6f} | "
-                f"PresLoss: {avg_pres_loss:.6f} | "
-                f"Gas R2: {avg_g:.4f} | "
-                f"Pres R2: {avg_p:.4f}"
+                f"Train Loss: {train_metrics['loss']:.6f} | "
+                f"Train Gas R2: {train_metrics['gas_r2']:.4f} | "
+                f"Train Pres R2: {train_metrics['pres_r2']:.4f} | "
+                f"Val Loss: {val_metrics['loss']:.6f} | "
+                f"Val Gas R2: {val_metrics['gas_r2']:.4f} | "
+                f"Val Pres R2: {val_metrics['pres_r2']:.4f}"
             )
 
-    torch.save(model.state_dict(), "checkpoints/fno3d_overfit_last.pt")
+    torch.save(model.state_dict(), "checkpoints/fno3d_generalisation_last.pt")
     normalizer.save("checkpoints/normalizer.pkl")
 
     print("Training complete.")
-    print("Saved best model to checkpoints/fno3d_overfit_best.pt")
-    print("Saved last model to checkpoints/fno3d_overfit_last.pt")
+    print("Saved best model to checkpoints/fno3d_generalisation_best.pt")
+    print("Saved last model to checkpoints/fno3d_generalisation_last.pt")
     print("Saved normalizer to checkpoints/normalizer.pkl")
+
+    # Final test evaluation using best checkpoint
+    print("Loading best validation checkpoint for test evaluation...")
+    model.load_state_dict(torch.load("checkpoints/fno3d_generalisation_best.pt", map_location=device))
+    test_metrics = run_epoch(model, test_loader, criterion, device, optimizer=None)
+
+    print("--------------")
+    print("Test Set Results")
+    print("--------------")
+    print(f"Test Loss:    {test_metrics['loss']:.6f}")
+    print(f"Test GasLoss: {test_metrics['gas_loss']:.6f}")
+    print(f"Test PresLoss:{test_metrics['pres_loss']:.6f}")
+    print(f"Test Gas R2:  {test_metrics['gas_r2']:.4f}")
+    print(f"Test Pres R2: {test_metrics['pres_r2']:.4f}")
 
 
 if __name__ == "__main__":
