@@ -19,6 +19,8 @@ def calculate_r2(pred, target):
 
 
 def train():
+    print(">>> CHECKPOINT-SAVING TRAIN.PY IS RUNNING <<<")
+
     torch.manual_seed(0)
     np.random.seed(0)
     os.makedirs("checkpoints", exist_ok=True)
@@ -39,7 +41,11 @@ def train():
     print(f"Resampling all samples to Z = {target_z}")
 
     normalizer = collect_stats(train_files, target_z=target_z)
-    train_dataset = CCSNetDataset(train_files, normalizer=normalizer, target_z=target_z)
+    train_dataset = CCSNetDataset(
+        train_files,
+        normalizer=normalizer,
+        target_z=target_z,
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=2,
@@ -57,13 +63,17 @@ def train():
 
     model = FNO3d(in_ch=11, width=32).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=50,
+        gamma=0.5,
+    )
     criterion = nn.MSELoss()
 
     best_loss = float("inf")
 
     print("Starting Training Loop...")
-    for epoch in range(1, 151):
+    for epoch in range(1, 201):
         model.train()
 
         total_loss = 0.0
@@ -107,6 +117,7 @@ def train():
             best_loss = avg_loss
             torch.save(model.state_dict(), "checkpoints/fno3d_overfit_best.pt")
             normalizer.save("checkpoints/normalizer.pkl")
+            print(f"New best model saved at epoch {epoch:03d}")
 
         if epoch % 5 == 0 or epoch == 1:
             print(
@@ -121,6 +132,7 @@ def train():
 
     torch.save(model.state_dict(), "checkpoints/fno3d_overfit_last.pt")
     normalizer.save("checkpoints/normalizer.pkl")
+
     print("Training complete.")
     print("Saved best model to checkpoints/fno3d_overfit_best.pt")
     print("Saved last model to checkpoints/fno3d_overfit_last.pt")

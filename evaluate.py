@@ -1,72 +1,115 @@
 import glob
 import numpy as np
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
 
 from src.data.data_processing import CCSNetDataset, Normalizer
 from src.models.fno_model import FNO3d
 
 
-def calculate_r2(pred, target):
-    pred = pred.detach().cpu().numpy().reshape(-1)
-    target = target.detach().cpu().numpy().reshape(-1)
+def r2(x, y):
+    x = x.flatten()
+    y = y.flatten()
 
-    ss_res = np.sum((target - pred) ** 2)
-    ss_tot = np.sum((target - np.mean(target)) ** 2) + 1e-8
-    return 1.0 - (ss_res / ss_tot)
+    x_std = np.std(x, ddof=1)
+    y_std = np.std(y, ddof=1)
+
+    if x_std < 1e-12 or y_std < 1e-12:
+        return 0.0
+
+    zx = (x - np.mean(x)) / x_std
+    zy = (y - np.mean(y)) / y_std
+    r = np.sum(zx * zy) / (len(x) - 1)
+    return r ** 2
+
+
+def MAE(x, y):
+    x = x.flatten()
+    y = y.flatten()
+    return np.mean(np.abs(x - y))
 
 
 def evaluate():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Evaluating on device: {device}")
 
-    test_files = sorted(glob.glob("dataset/test_data/*.npz"))
-    if len(test_files) == 0:
-        print("Error: No .npz files found in dataset/test_data/")
+    all_files = sorted(glob.glob("dataset/train_data/*.npz"))
+    if len(all_files) == 0:
+        print("Error: No .npz files found in dataset/train_data/")
         return
 
+    # Training used all_files[:8], so choose a non-overlapping unseen slice
+    eval_files = all_files[100:150]
+
+    if len(eval_files) == 0:
+        print("Error: No evaluation files selected.")
+        return
+
+    print(f"Using {len(eval_files)} unseen files for evaluation.")
+
     normalizer = Normalizer.load("checkpoints/normalizer.pkl")
-    test_dataset = CCSNetDataset(test_files, normalizer=normalizer, target_z=51)
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=0,
-    )
 
     model = FNO3d(in_ch=11, width=32).to(device)
-    model.load_state_dict(torch.load("checkpoints/fno3d_overfit_best.pt", map_location=device))
+    model.load_state_dict(
+        torch.load("checkpoints/fno3d_overfit_best.pt", map_location=device)
+    )
     model.eval()
 
-    criterion = nn.MSELoss()
+    gas_saturation_r2 = []
+    pressure_buildup_r2 = []
+    gas_saturation_MAE = []
+    pressure_buildup_MAE = []
 
-    total_gas_loss = 0.0
-    total_pres_loss = 0.0
-    total_gas_r2 = 0.0
-    total_pres_r2 = 0.0
+    for file_path in eval_files:
+        # Raw truth from archive
+        with np.load(file_path) as raw_data:
+            gas_true_raw = raw_data["gas_saturation"].astype(np.float32)      # [Z, R, T]
+            pres_true_raw = raw_data["pressure_buildup"].astype(np.float32)   # [Z, R, T]
 
-    with torch.no_grad():
-        for x, gas_true, pres_true in test_loader:
-            x = x.to(device)
-            gas_true = gas_true.to(device)
-            pres_true = pres_true.to(device)
+        # Build model input using same preprocessing pipeline
+        dataset = CCSNetDataset([file_path], normalizer=normalizer, target_z=51)
+        x, _, _ = dataset[0]
 
+        x = x.unsqueeze(0).to(device)
+
+        with torch.no_grad():
             gas_pred, pres_pred = model(x)
 
-            gas_loss = criterion(gas_pred, gas_true)
-            pres_loss = criterion(pres_pred, pres_true)
+        # Model outputs are [1, 1, T, Z, R] -> [T, Z, R]
+        gas_pred = gas_pred.squeeze(0).squeeze(0).cpu().numpy()
+        pres_pred = pres_pred.squeeze(0).squeeze(0).cpu().numpy()
 
-            total_gas_loss += gas_loss.item()
-            total_pres_loss += pres_loss.item()
-            total_gas_r2 += calculate_r2(gas_pred, gas_true)
-            total_pres_r2 += calculate_r2(pres_pred, pres_true)
+        # Pressure prediction is normalized, so denormalize it
+        pres_pred = normalizer.denormalize("pressure_buildup", pres_pred)
 
-    n = len(test_loader)
-    print(f"Gas MSE:  {total_gas_loss / n:.6f}")
-    print(f"Pres MSE: {total_pres_loss / n:.6f}")
-    print(f"Gas R2:   {total_gas_r2 / n:.4f}")
-    print(f"Pres R2:  {total_pres_r2 / n:.4f}")
+        # Convert predictions from [T, Z, R] -> [Z, R, T]
+        gas_pred = np.transpose(gas_pred, (1, 2, 0))
+        pres_pred = np.transpose(pres_pred, (1, 2, 0))
+
+        # If raw truth is not already Z=51, resample it through the dataset pipeline instead
+        if gas_true_raw.shape != gas_pred.shape or pres_true_raw.shape != pres_pred.shape:
+            _, gas_true_proc, pres_true_proc = dataset[0]
+
+            gas_true_raw = gas_true_proc.squeeze(0).numpy()   # [T, Z, R]
+            pres_true_proc = pres_true_proc.squeeze(0).numpy()  # normalized [T, Z, R]
+
+            # Denormalize processed pressure truth
+            pres_true_proc = normalizer.denormalize("pressure_buildup", pres_true_proc)
+
+            gas_true_raw = np.transpose(gas_true_raw, (1, 2, 0))   # [Z, R, T]
+            pres_true_raw = np.transpose(pres_true_proc, (1, 2, 0))  # [Z, R, T]
+
+        gas_saturation_r2.append(r2(gas_true_raw, gas_pred))
+        pressure_buildup_r2.append(r2(pres_true_raw, pres_pred))
+
+        gas_saturation_MAE.append(MAE(gas_true_raw, gas_pred))
+        pressure_buildup_MAE.append(MAE(pres_true_raw, pres_pred))
+
+    print("--------------")
+    print(f"Average gas saturation R2: {np.mean(gas_saturation_r2):.6f}")
+    print(f"Average pressure buildup R2: {np.mean(pressure_buildup_r2):.6f}")
+    print("--------------")
+    print(f"Average gas saturation MAE: {np.mean(gas_saturation_MAE):.6f}")
+    print(f"Average pressure buildup MAE: {np.mean(pressure_buildup_MAE):.6f}")
 
 
 if __name__ == "__main__":
