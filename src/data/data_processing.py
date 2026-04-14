@@ -39,9 +39,6 @@ class Normalizer:
 
 
 def resample_2d_z(field, target_z):
-    """
-    Resample a 2D field from [Z, R] to [target_z, R] along the Z axis.
-    """
     old_z, r = field.shape
     if old_z == target_z:
         return field.astype(np.float32)
@@ -57,9 +54,6 @@ def resample_2d_z(field, target_z):
 
 
 def resample_3d_z(field, target_z):
-    """
-    Resample a 3D field from [Z, R, T] to [target_z, R, T] along the Z axis.
-    """
     old_z, r, t = field.shape
     if old_z == target_z:
         return field.astype(np.float32)
@@ -76,9 +70,6 @@ def resample_3d_z(field, target_z):
 
 
 def rescale_perf_interval(perf_interval, old_z, target_z):
-    """
-    Rescale perf_interval from old Z resolution to target Z resolution.
-    """
     start, end = int(perf_interval[0]), int(perf_interval[1])
 
     start_scaled = int(round(start * target_z / old_z))
@@ -91,9 +82,6 @@ def rescale_perf_interval(perf_interval, old_z, target_z):
 
 
 def collect_stats(files, target_z=51):
-    """
-    Fit a Normalizer on the provided files after resampling to a common Z grid.
-    """
     keys = [
         "porosity",
         "perm_r",
@@ -107,7 +95,7 @@ def collect_stats(files, target_z=51):
     ]
     data_map = {k: [] for k in keys}
 
-    for f in files[:200]:
+    for f in files:
         with np.load(f) as d:
             porosity = resample_2d_z(d["porosity"], target_z)
             perm_r = resample_2d_z(d["perm_r"], target_z)
@@ -132,49 +120,41 @@ def collect_stats(files, target_z=51):
 
 def load_sample(file_path, normalizer, target_z=51):
     with np.load(file_path) as data:
-        old_z, r = data["porosity"].shape
+        old_z, _ = data["porosity"].shape
 
-        # Resample static spatial fields
         porosity_raw = resample_2d_z(data["porosity"], target_z)
         perm_r_raw = resample_2d_z(data["perm_r"], target_z)
         perm_z_raw = resample_2d_z(data["perm_z"], target_z)
 
-        # Resample dynamic targets
         gas_raw = resample_3d_z(data["gas_saturation"], target_z)
         pressure_raw = resample_3d_z(data["pressure_buildup"], target_z)
 
-        # Normalize static spatial fields
         porosity = normalizer.normalize("porosity", porosity_raw)
         perm_r = normalizer.normalize("perm_r", perm_r_raw)
         perm_z = normalizer.normalize("perm_z", perm_z_raw)
 
-        # Normalize scalar parameters
         inj_rate = normalizer.normalize("inj_rate", np.asarray(data["inj_rate"], dtype=np.float32))
         temperature = normalizer.normalize("temperature", np.asarray(data["temperature"], dtype=np.float32))
         depth = normalizer.normalize("depth", np.asarray(data["depth"], dtype=np.float32))
         swi = normalizer.normalize("Swi", np.asarray(data["Swi"], dtype=np.float32))
         lam = normalizer.normalize("lam", np.asarray(data["lam"], dtype=np.float32))
 
-        # Targets: [Z, R, T] -> [T, Z, R]
-        gas = np.transpose(gas_raw, (2, 0, 1)).astype(np.float32)
+        gas = np.transpose(gas_raw, (2, 0, 1)).astype(np.float32)       # [T, Z, R]
         pressure = np.transpose(pressure_raw, (2, 0, 1)).astype(np.float32)
         pressure = normalizer.normalize("pressure_buildup", pressure)
 
         T, Z, R = gas.shape
 
-        # Coordinates in [-1, 1]
         z_coords = np.linspace(-1.0, 1.0, Z, dtype=np.float32)[:, None]
         r_coords = np.linspace(-1.0, 1.0, R, dtype=np.float32)[None, :]
         z_grid = np.broadcast_to(z_coords, (Z, R))
         r_grid = np.broadcast_to(r_coords, (Z, R))
 
-        # Injection source from perf interval, combined with rate
         z_start, z_end = rescale_perf_interval(data["perf_interval"], old_z, target_z)
         source = np.zeros((Z, R), dtype=np.float32)
         source[z_start:z_end, 0] = 1.0
         source_strength = source * np.float32(inj_rate)
 
-        # Broadcast scalar parameters to spatial grids
         temperature_grid = np.full((Z, R), temperature, dtype=np.float32)
         depth_grid = np.full((Z, R), depth, dtype=np.float32)
         swi_grid = np.full((Z, R), swi, dtype=np.float32)
@@ -182,18 +162,6 @@ def load_sample(file_path, normalizer, target_z=51):
 
         time_steps = np.linspace(0.0, 1.0, T, dtype=np.float32)
 
-        # Channels:
-        # 0 porosity
-        # 1 perm_r
-        # 2 perm_z
-        # 3 temperature
-        # 4 depth
-        # 5 Swi
-        # 6 lam
-        # 7 r coordinate
-        # 8 z coordinate
-        # 9 source_strength
-        # 10 time
         x = np.zeros((11, T, Z, R), dtype=np.float32)
 
         for t in range(T):

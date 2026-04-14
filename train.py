@@ -18,7 +18,7 @@ def calculate_r2(pred, target):
     return 1.0 - (ss_res / ss_tot)
 
 
-def run_epoch(model, loader, criterion, device, optimizer=None):
+def run_epoch(model, loader, criterion, device, optimizer=None, pressure_weight=0.2):
     is_train = optimizer is not None
 
     if is_train:
@@ -45,7 +45,7 @@ def run_epoch(model, loader, criterion, device, optimizer=None):
 
             gas_loss = criterion(gas_pred, gas_true)
             pres_loss = criterion(pres_pred, pres_true)
-            loss = gas_loss + pres_loss
+            loss = gas_loss + pressure_weight * pres_loss
 
             if is_train:
                 loss.backward()
@@ -68,23 +68,23 @@ def run_epoch(model, loader, criterion, device, optimizer=None):
 
 
 def train():
-    print(">>> COLAB GENERALISATION TRAIN.PY IS RUNNING <<<")
+    print(">>> FINAL GENERALISATION TRAIN.PY IS RUNNING <<<", flush=True)
 
     torch.manual_seed(0)
     np.random.seed(0)
     os.makedirs("checkpoints", exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Training on device: {device}")
+    print(f"Training on device: {device}", flush=True)
 
     data_path = os.getenv("DATA_PATH", "dataset/train_data/*.npz")
     all_files = sorted(glob.glob(data_path))
 
-    print(f"Using data path: {data_path}")
-    print(f"Found {len(all_files)} files")
+    print(f"Using data path: {data_path}", flush=True)
+    print(f"Found {len(all_files)} files", flush=True)
 
     if len(all_files) < 70:
-        print("Error: Need at least 70 files for 50/10/10 split.")
+        print("Error: Need at least 70 files for 50/10/10 split.", flush=True)
         return
 
     target_z = 51
@@ -93,11 +93,12 @@ def train():
     val_files = all_files[50:60]
     test_files = all_files[60:70]
 
-    print(f"Train: {len(train_files)} | Val: {len(val_files)} | Test: {len(test_files)}")
-    print(f"Resampling all samples to Z = {target_z}")
+    print(f"Train: {len(train_files)} | Val: {len(val_files)} | Test: {len(test_files)}", flush=True)
+    print(f"Resampling all samples to Z = {target_z}", flush=True)
 
-    # Fit normalizer on train files only
+    print("Fitting normalizer on training files...", flush=True)
     normalizer = collect_stats(train_files, target_z=target_z)
+    print("Normalizer fitted.", flush=True)
 
     train_dataset = CCSNetDataset(train_files, normalizer=normalizer, target_z=target_z)
     val_dataset = CCSNetDataset(val_files, normalizer=normalizer, target_z=target_z)
@@ -108,12 +109,12 @@ def train():
     test_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=0)
 
     sample_x, sample_gas, sample_pres = train_dataset[0]
-    print("Sample x shape:", sample_x.shape)
-    print("Sample gas shape:", sample_gas.shape)
-    print("Sample pres shape:", sample_pres.shape)
-    print("Sample x nan?:", torch.isnan(sample_x).any().item())
-    print("Sample gas nan?:", torch.isnan(sample_gas).any().item())
-    print("Sample pres nan?:", torch.isnan(sample_pres).any().item())
+    print("Sample x shape:", sample_x.shape, flush=True)
+    print("Sample gas shape:", sample_gas.shape, flush=True)
+    print("Sample pres shape:", sample_pres.shape, flush=True)
+    print("Sample x nan?:", torch.isnan(sample_x).any().item(), flush=True)
+    print("Sample gas nan?:", torch.isnan(sample_gas).any().item(), flush=True)
+    print("Sample pres nan?:", torch.isnan(sample_pres).any().item(), flush=True)
 
     model = FNO3d(in_ch=11, width=32).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -121,11 +122,18 @@ def train():
     criterion = nn.MSELoss()
 
     best_val_loss = float("inf")
+    pressure_weight = 0.2
 
-    print("Starting Training Loop...")
+    print("Starting Training Loop...", flush=True)
     for epoch in range(1, 101):
-        train_metrics = run_epoch(model, train_loader, criterion, device, optimizer=optimizer)
-        val_metrics = run_epoch(model, val_loader, criterion, device, optimizer=None)
+        train_metrics = run_epoch(
+            model, train_loader, criterion, device,
+            optimizer=optimizer, pressure_weight=pressure_weight
+        )
+        val_metrics = run_epoch(
+            model, val_loader, criterion, device,
+            optimizer=None, pressure_weight=pressure_weight
+        )
 
         scheduler.step()
         current_lr = optimizer.param_groups[0]["lr"]
@@ -134,7 +142,7 @@ def train():
             best_val_loss = val_metrics["loss"]
             torch.save(model.state_dict(), "checkpoints/fno3d_generalisation_best.pt")
             normalizer.save("checkpoints/normalizer.pkl")
-            print(f"New best validation model saved at epoch {epoch:03d}")
+            print(f"New best validation model saved at epoch {epoch:03d}", flush=True)
 
         if epoch % 5 == 0 or epoch == 1:
             print(
@@ -145,30 +153,33 @@ def train():
                 f"Train Pres R2: {train_metrics['pres_r2']:.4f} | "
                 f"Val Loss: {val_metrics['loss']:.6f} | "
                 f"Val Gas R2: {val_metrics['gas_r2']:.4f} | "
-                f"Val Pres R2: {val_metrics['pres_r2']:.4f}"
+                f"Val Pres R2: {val_metrics['pres_r2']:.4f}",
+                flush=True,
             )
 
     torch.save(model.state_dict(), "checkpoints/fno3d_generalisation_last.pt")
     normalizer.save("checkpoints/normalizer.pkl")
 
-    print("Training complete.")
-    print("Saved best model to checkpoints/fno3d_generalisation_best.pt")
-    print("Saved last model to checkpoints/fno3d_generalisation_last.pt")
-    print("Saved normalizer to checkpoints/normalizer.pkl")
+    print("Training complete.", flush=True)
+    print("Saved best model to checkpoints/fno3d_generalisation_best.pt", flush=True)
+    print("Saved last model to checkpoints/fno3d_generalisation_last.pt", flush=True)
+    print("Saved normalizer to checkpoints/normalizer.pkl", flush=True)
 
-    # Final test evaluation using best checkpoint
-    print("Loading best validation checkpoint for test evaluation...")
+    print("Loading best validation checkpoint for test evaluation...", flush=True)
     model.load_state_dict(torch.load("checkpoints/fno3d_generalisation_best.pt", map_location=device))
-    test_metrics = run_epoch(model, test_loader, criterion, device, optimizer=None)
+    test_metrics = run_epoch(
+        model, test_loader, criterion, device,
+        optimizer=None, pressure_weight=pressure_weight
+    )
 
-    print("--------------")
-    print("Test Set Results")
-    print("--------------")
-    print(f"Test Loss:    {test_metrics['loss']:.6f}")
-    print(f"Test GasLoss: {test_metrics['gas_loss']:.6f}")
-    print(f"Test PresLoss:{test_metrics['pres_loss']:.6f}")
-    print(f"Test Gas R2:  {test_metrics['gas_r2']:.4f}")
-    print(f"Test Pres R2: {test_metrics['pres_r2']:.4f}")
+    print("--------------", flush=True)
+    print("Test Set Results", flush=True)
+    print("--------------", flush=True)
+    print(f"Test Loss:     {test_metrics['loss']:.6f}", flush=True)
+    print(f"Test GasLoss:  {test_metrics['gas_loss']:.6f}", flush=True)
+    print(f"Test PresLoss: {test_metrics['pres_loss']:.6f}", flush=True)
+    print(f"Test Gas R2:   {test_metrics['gas_r2']:.4f}", flush=True)
+    print(f"Test Pres R2:  {test_metrics['pres_r2']:.4f}", flush=True)
 
 
 if __name__ == "__main__":

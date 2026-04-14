@@ -1,3 +1,4 @@
+import os
 import glob
 import numpy as np
 import torch
@@ -32,14 +33,13 @@ def evaluate():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Evaluating on device: {device}")
 
-    all_files = sorted(glob.glob("dataset/train_data/*.npz"))
+    data_path = os.getenv("DATA_PATH", "dataset/train_data/*.npz")
+    all_files = sorted(glob.glob(data_path))
     if len(all_files) == 0:
-        print("Error: No .npz files found in dataset/train_data/")
+        print(f"Error: No .npz files found at {data_path}")
         return
 
-    # Training used all_files[:8], so choose a non-overlapping unseen slice
     eval_files = all_files[100:150]
-
     if len(eval_files) == 0:
         print("Error: No evaluation files selected.")
         return
@@ -48,10 +48,12 @@ def evaluate():
 
     normalizer = Normalizer.load("checkpoints/normalizer.pkl")
 
+    ckpt = "checkpoints/fno3d_generalisation_best.pt"
+    if not os.path.exists(ckpt):
+        ckpt = "checkpoints/fno3d_overfit_best.pt"
+
     model = FNO3d(in_ch=11, width=32).to(device)
-    model.load_state_dict(
-        torch.load("checkpoints/fno3d_overfit_best.pt", map_location=device)
-    )
+    model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
 
     gas_saturation_r2 = []
@@ -60,43 +62,37 @@ def evaluate():
     pressure_buildup_MAE = []
 
     for file_path in eval_files:
-        # Raw truth from archive
         with np.load(file_path) as raw_data:
-            gas_true_raw = raw_data["gas_saturation"].astype(np.float32)      # [Z, R, T]
-            pres_true_raw = raw_data["pressure_buildup"].astype(np.float32)   # [Z, R, T]
+            gas_true_raw = raw_data["gas_saturation"].astype(np.float32)
+            pres_true_raw = raw_data["pressure_buildup"].astype(np.float32)
 
-        # Build model input using same preprocessing pipeline
         dataset = CCSNetDataset([file_path], normalizer=normalizer, target_z=51)
-        x, _, _ = dataset[0]
+        x, _, pres_true_proc = dataset[0]
 
         x = x.unsqueeze(0).to(device)
 
         with torch.no_grad():
             gas_pred, pres_pred = model(x)
 
-        # Model outputs are [1, 1, T, Z, R] -> [T, Z, R]
-        gas_pred = gas_pred.squeeze(0).squeeze(0).cpu().numpy()
+        gas_pred = gas_pred.squeeze(0).squeeze(0).cpu().numpy()   # [T, Z, R]
         pres_pred = pres_pred.squeeze(0).squeeze(0).cpu().numpy()
 
-        # Pressure prediction is normalized, so denormalize it
         pres_pred = normalizer.denormalize("pressure_buildup", pres_pred)
 
-        # Convert predictions from [T, Z, R] -> [Z, R, T]
-        gas_pred = np.transpose(gas_pred, (1, 2, 0))
+        gas_pred = np.transpose(gas_pred, (1, 2, 0))   # [Z, R, T]
         pres_pred = np.transpose(pres_pred, (1, 2, 0))
 
-        # If raw truth is not already Z=51, resample it through the dataset pipeline instead
         if gas_true_raw.shape != gas_pred.shape or pres_true_raw.shape != pres_pred.shape:
+            dataset = CCSNetDataset([file_path], normalizer=normalizer, target_z=51)
             _, gas_true_proc, pres_true_proc = dataset[0]
 
-            gas_true_raw = gas_true_proc.squeeze(0).numpy()   # [T, Z, R]
-            pres_true_proc = pres_true_proc.squeeze(0).numpy()  # normalized [T, Z, R]
+            gas_true_raw = gas_true_proc.squeeze(0).numpy()
+            pres_true_proc = pres_true_proc.squeeze(0).numpy()
 
-            # Denormalize processed pressure truth
             pres_true_proc = normalizer.denormalize("pressure_buildup", pres_true_proc)
 
-            gas_true_raw = np.transpose(gas_true_raw, (1, 2, 0))   # [Z, R, T]
-            pres_true_raw = np.transpose(pres_true_proc, (1, 2, 0))  # [Z, R, T]
+            gas_true_raw = np.transpose(gas_true_raw, (1, 2, 0))
+            pres_true_raw = np.transpose(pres_true_proc, (1, 2, 0))
 
         gas_saturation_r2.append(r2(gas_true_raw, gas_pred))
         pressure_buildup_r2.append(r2(pres_true_raw, pres_pred))
