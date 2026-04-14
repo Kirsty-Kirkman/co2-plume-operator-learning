@@ -1,151 +1,105 @@
 import torch
 import torch.nn as nn
-import torch.fft
+import torch.nn.functional as F
 
 
-class SpectralConv2d(nn.Module):
-    """
-    2D spectral convolution layer for FNO.
-
-    Applies FFT -> learned complex weights on low-frequency modes -> inverse FFT.
-    """
-
-    def __init__(self, in_channels, out_channels, modes1, modes2):
+class SpectralConv3d(nn.Module):
+    def __init__(self, in_channels, out_channels, modes1, modes2, modes3):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.modes1 = modes1
         self.modes2 = modes2
+        self.modes3 = modes3
 
         scale = 1 / (in_channels * out_channels)
-
-        self.weights1 = nn.Parameter(
-            scale * torch.randn(in_channels, out_channels, modes1, modes2, dtype=torch.cfloat)
+        self.weights = nn.ParameterList(
+            [
+                nn.Parameter(
+                    scale
+                    * torch.randn(
+                        in_channels,
+                        out_channels,
+                        modes1,
+                        modes2,
+                        modes3,
+                        dtype=torch.cfloat,
+                    )
+                )
+                for _ in range(4)
+            ]
         )
-        self.weights2 = nn.Parameter(
-            scale * torch.randn(in_channels, out_channels, modes1, modes2, dtype=torch.cfloat)
-        )
 
-    def compl_mul2d(self, input, weights):
-        # input:   (batch, in_channels, x, y)
-        # weights: (in_channels, out_channels, x, y)
-        # output:  (batch, out_channels, x, y)
-        return torch.einsum("bixy,ioxy->boxy", input, weights)
+    def compl_mul3d(self, input, weights):
+        # input:   [B, in_channels, X, Y, Z]
+        # weights: [in_channels, out_channels, X, Y, Z]
+        # output:  [B, out_channels, X, Y, Z]
+        return torch.einsum("bixyz,ioxyz->boxyz", input, weights)
 
     def forward(self, x):
         batchsize = x.shape[0]
-        size_x = x.shape[-2]
-        size_y = x.shape[-1]
 
-        x_ft = torch.fft.rfft2(x)
+        # x: [B, C, T, Z, R]
+        x_ft = torch.fft.rfftn(x, dim=[-3, -2, -1])
+
+        T = x.size(-3)
+        Z = x.size(-2)
+        Rf = x.size(-1) // 2 + 1
 
         out_ft = torch.zeros(
             batchsize,
             self.out_channels,
-            size_x,
-            size_y // 2 + 1,
+            T,
+            Z,
+            Rf,
             dtype=torch.cfloat,
             device=x.device,
         )
 
-        m1 = min(self.modes1, size_x)
-        m2 = min(self.modes2, size_y // 2 + 1)
+        m1 = min(self.modes1, T)
+        m2 = min(self.modes2, Z)
+        m3 = min(self.modes3, Rf)
 
-        out_ft[:, :, :m1, :m2] = self.compl_mul2d(
-            x_ft[:, :, :m1, :m2],
-            self.weights1[:, :, :m1, :m2],
+        out_ft[:, :, :m1, :m2, :m3] = self.compl_mul3d(
+            x_ft[:, :, :m1, :m2, :m3], self.weights[0][:, :, :m1, :m2, :m3]
+        )
+        out_ft[:, :, -m1:, :m2, :m3] = self.compl_mul3d(
+            x_ft[:, :, -m1:, :m2, :m3], self.weights[1][:, :, :m1, :m2, :m3]
+        )
+        out_ft[:, :, :m1, -m2:, :m3] = self.compl_mul3d(
+            x_ft[:, :, :m1, -m2:, :m3], self.weights[2][:, :, :m1, :m2, :m3]
+        )
+        out_ft[:, :, -m1:, -m2:, :m3] = self.compl_mul3d(
+            x_ft[:, :, -m1:, -m2:, :m3], self.weights[3][:, :, :m1, :m2, :m3]
         )
 
-        out_ft[:, :, -m1:, :m2] = self.compl_mul2d(
-            x_ft[:, :, -m1:, :m2],
-            self.weights2[:, :, :m1, :m2],
-        )
-
-        x = torch.fft.irfft2(out_ft, s=(size_x, size_y))
-        return x
+        return torch.fft.irfftn(out_ft, s=(x.size(-3), x.size(-2), x.size(-1)))
 
 
-class FNOBlock2d(nn.Module):
-    """
-    One FNO block:
-    spectral conv + pointwise conv + activation.
-    """
-
-    def __init__(self, width, modes1, modes2):
+class FNO3d(nn.Module):
+    def __init__(self, in_ch=11, width=32, modes_t=8, modes_z=12, modes_r=12):
         super().__init__()
-        self.spectral = SpectralConv2d(width, width, modes1, modes2)
-        self.w = nn.Conv2d(width, width, kernel_size=1)
-        self.act = nn.GELU()
+        self.input_proj = nn.Conv3d(in_ch, width, kernel_size=1)
 
-    def forward(self, x):
-        x = self.spectral(x) + self.w(x)
-        x = self.act(x)
-        return x
+        self.spectral = SpectralConv3d(width, width, modes_t, modes_z, modes_r)
+        self.bypass = nn.Conv3d(width, width, kernel_size=1)
 
-
-class FNO2d(nn.Module):
-    """
-    Fourier Neural Operator for CCS plume prediction.
-
-    Input shape:
-        (batch, in_ch, nz, nx)
-
-    Output:
-        gas:      (batch, 24, nz, nx)
-        pressure: (batch, 24, nz, nx)
-
-    Notes
-    -----
-    - Set in_ch=11 if using:
-      [porosity, perm_r, perm_z, inj_rate, temperature, depth,
-       Swi, lam, perf_mask, z_channel, r_channel]
-    - Predicts all 24 timesteps at once for both fields.
-    """
-
-    def __init__(
-        self,
-        in_ch=11,
-        width=48,
-        modes1=12,
-        modes2=16,
-        n_blocks=4,
-        out_ch_per_field=24,
-    ):
-        super().__init__()
-
-        self.in_ch = in_ch
-        self.width = width
-        self.out_ch_per_field = out_ch_per_field
-
-        # Lift input channels to model width
-        self.input_proj = nn.Conv2d(in_ch, width, kernel_size=1)
-
-        # FNO blocks
-        self.blocks = nn.ModuleList(
-            [FNOBlock2d(width, modes1, modes2) for _ in range(n_blocks)]
+        self.gas_head = nn.Sequential(
+            nn.Conv3d(width, 128, kernel_size=1),
+            nn.GELU(),
+            nn.Conv3d(128, 1, kernel_size=1),
+            nn.Sigmoid(),
         )
 
-        # Shared decoder trunk
-        self.decoder = nn.Sequential(
-            nn.Conv2d(width, width, kernel_size=1),
+        self.pres_head = nn.Sequential(
+            nn.Conv3d(width, 128, kernel_size=1),
             nn.GELU(),
-            nn.Conv2d(width, width, kernel_size=1),
-            nn.GELU(),
+            nn.Conv3d(128, 1, kernel_size=1),
         )
-
-        # Separate heads
-        self.gas_head = nn.Conv2d(width, out_ch_per_field, kernel_size=1)
-        self.pressure_head = nn.Conv2d(width, out_ch_per_field, kernel_size=1)
 
     def forward(self, x):
         x = self.input_proj(x)
-
-        for block in self.blocks:
-            x = block(x)
-
-        x = self.decoder(x)
-
+        x = F.gelu(self.spectral(x) + self.bypass(x))
         gas = self.gas_head(x)
-        pressure = self.pressure_head(x)
-
-        return gas, pressure
+        pres = self.pres_head(x)
+        return gas, pres

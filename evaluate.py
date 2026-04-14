@@ -1,134 +1,83 @@
 import numpy as np
 import torch
+import glob
+import torch.nn.functional as F
+from fno_model import FNO3d
+from data_processing import collect_stats, load_sample, normalize
 
-from src.models.fno_model import FNO2d
-from src.data.data_processing import (
-    collect_stats,
-    get_train_val_files,
-    normalize,
-    build_coordinate_channels,
-)
+def r2_score(pred, target):
+    """
+    Standard R2 score for physical evaluation.
+    """
+    pred = pred.flatten()
+    target = target.flatten()
+    target_mean = np.mean(target)
+    ss_res = np.sum((target - pred) ** 2)
+    ss_tot = np.sum((target - target_mean) ** 2)
+    return 1 - (ss_res / (ss_tot + 1e-8))
 
+def mae_score(pred, target):
+    return np.mean(np.abs(pred - target))
 
-def r2(x, y):
-    x = x.flatten()
-    y = y.flatten()
-    zx = (x - np.mean(x)) / np.std(x, ddof=1)
-    zy = (y - np.mean(y)) / np.std(y, ddof=1)
-    r = np.sum(zx * zy) / (len(x) - 1)
-    return r ** 2
-
-
-def MAE(x, y):
-    x = x.flatten()
-    y = y.flatten()
-    return np.mean(np.abs(x - y))
-
-
-def build_input(data, stats):
-    porosity = data["porosity"].astype(np.float32)
-    perm_r = np.log10(data["perm_r"].astype(np.float32) + 1e-12)
-    perm_z = np.log10(data["perm_z"].astype(np.float32) + 1e-12)
-
-    nz, nx = porosity.shape
-
-    inj_rate = np.full((nz, nx), data["inj_rate"], dtype=np.float32)
-    temperature = np.full((nz, nx), data["temperature"], dtype=np.float32)
-    depth = np.full((nz, nx), data["depth"], dtype=np.float32)
-    swi = np.full((nz, nx), data["Swi"], dtype=np.float32)
-    lam = np.full((nz, nx), data["lam"], dtype=np.float32)
-
-    perf_mask = np.zeros((nz, nx), dtype=np.float32)
-    z0, z1 = int(data["perf_interval"][0]), int(data["perf_interval"][1])
-    perf_mask[z0:z1 + 1, 0] = 1.0
-
-    z_channel, r_channel = build_coordinate_channels(nz, nx)
-
-    porosity = normalize(porosity, stats["porosity"]["mean"], stats["porosity"]["std"])
-    perm_r = normalize(perm_r, stats["perm_r"]["mean"], stats["perm_r"]["std"])
-    perm_z = normalize(perm_z, stats["perm_z"]["mean"], stats["perm_z"]["std"])
-    inj_rate = normalize(inj_rate, stats["inj_rate"]["mean"], stats["inj_rate"]["std"])
-    temperature = normalize(temperature, stats["temperature"]["mean"], stats["temperature"]["std"])
-    depth = normalize(depth, stats["depth"]["mean"], stats["depth"]["std"])
-    swi = normalize(swi, stats["Swi"]["mean"], stats["Swi"]["std"])
-    lam = normalize(lam, stats["lam"]["mean"], stats["lam"]["std"])
-
-    x = np.stack(
-        [
-            porosity,
-            perm_r,
-            perm_z,
-            inj_rate,
-            temperature,
-            depth,
-            swi,
-            lam,
-            perf_mask,
-            z_channel,
-            r_channel,
-        ],
-        axis=0,
-    )
-
-    return x
-
-
-def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Using device:", device)
-
-    all_train_files, all_val_files = get_train_val_files()
-
-    # Keep these aligned with the training run that produced fno_coords_200_best.pt
-    train_files = all_train_files[:200]
-    val_files = all_val_files[:50]
-
-    stats = collect_stats(train_files, max_files=200)
-
-    model = FNO2d(in_ch=11).to(device)
-    model.load_state_dict(
-        torch.load("checkpoints/fno_coords_200_best.pt", map_location=device)
-    )
+def evaluate_model(model_path, data_dir, device="cpu"):
+    # 1. Setup Data and Stats
+    test_files = sorted(glob.glob(f"{data_dir}/*.npz"))
+    # Use the same stats logic used during training
+    stats = collect_stats(test_files) 
+    
+    # 2. Load Model
+    model = FNO3d(in_ch=11, width=32, modes_t=8, modes_z=12, modes_r=12).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
-    gas_saturation_r2, pressure_buildup_r2 = [], []
-    gas_saturation_MAE, pressure_buildup_MAE = [], []
+    gas_r2_list, pressure_r2_list = [], []
+    gas_mae_list, pressure_mae_list = [], []
 
-    for file_path in val_files:
-        with np.load(file_path) as data:
-            gas_saturation = data["gas_saturation"]
-            pressure_buildup = data["pressure_buildup"]
+    print(f"Starting evaluation on {len(test_files)} files...")
 
-            x = build_input(data, stats)
-            x_tensor = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(device)
+    with torch.no_grad():
+        for file_path in test_files:
+            # Load and normalize sample using the 3D logic
+            x, gas_true, pressure_true = load_sample(file_path, stats=stats)
+            
+            # Prepare for model (add batch dimension)
+            x = x.unsqueeze(0).to(device)
+            
+            # Forward Pass
+            gas_pred, pressure_pred = model(x)
+            
+            # Convert back to CPU/Numpy and remove dimensions
+            gas_pred = gas_pred.squeeze().cpu().numpy()         # (nt, nz, nx)
+            gas_true = gas_true.squeeze().cpu().numpy()
+            pressure_pred = pressure_pred.squeeze().cpu().numpy()
+            pressure_true = pressure_true.squeeze().cpu().numpy()
 
-            with torch.no_grad():
-                gas_pred, pressure_pred = model(x_tensor)
+            # 3. De-normalize Pressure
+            # Gas is usually 0-1, but pressure needs to return to physical units
+            pressure_pred_phys = (pressure_pred * stats["pressure"]["std"]) + stats["pressure"]["mean"]
+            pressure_true_phys = (pressure_true * stats["pressure"]["std"]) + stats["pressure"]["mean"]
 
-            gas_pred = gas_pred.squeeze(0).cpu().numpy()
-            pressure_pred = pressure_pred.squeeze(0).cpu().numpy()
+            # 4. Calculate Metrics
+            g_r2 = r2_score(gas_pred, gas_true)
+            p_r2 = r2_score(pressure_pred_phys, pressure_true_phys)
+            
+            gas_r2_list.append(g_r2)
+            pressure_r2_list.append(p_r2)
+            gas_mae_list.append(mae_score(gas_pred, gas_true))
+            pressure_mae_list.append(mae_score(pressure_pred_phys, pressure_true_phys))
 
-            pressure_pred = (
-                pressure_pred * stats["pressure"]["std"]
-                + stats["pressure"]["mean"]
-            )
-
-            gas_saturation_pred = np.transpose(gas_pred, (1, 2, 0))
-            pressure_buildup_pred = np.transpose(pressure_pred, (1, 2, 0))
-
-            gas_saturation_r2.append(r2(gas_saturation, gas_saturation_pred))
-            pressure_buildup_r2.append(r2(pressure_buildup, pressure_buildup_pred))
-
-            gas_saturation_MAE.append(MAE(gas_saturation, gas_saturation_pred))
-            pressure_buildup_MAE.append(MAE(pressure_buildup, pressure_buildup_pred))
-
-    print("--------------")
-    print(f"Average validation set gas saturation R2 score is: {np.mean(gas_saturation_r2)}")
-    print(f"Average validation set pressure buildup R2 score is: {np.mean(pressure_buildup_r2)}")
-    print("--------------")
-    print(f"Average validation set gas saturation MAE is: {np.mean(gas_saturation_MAE)}")
-    print(f"Average validation set pressure buildup MAE is: {np.mean(pressure_buildup_MAE)}")
-
+    # 5. Final Report
+    print("\n--- Evaluation Results ---")
+    print(f"Gas Saturation R2:    {np.mean(gas_r2_list):.4f}")
+    print(f"Pressure Buildup R2:  {np.mean(pressure_r2_list):.4f}")
+    print(f"Gas Saturation MAE:   {np.mean(gas_mae_list):.6f}")
+    print(f"Pressure Buildup MAE: {np.mean(pressure_mae_list):.4f}")
+    
+    # Lecturer tip: R2 > 0.95 is generally considered a strong performance
+    if np.mean(gas_r2_list) > 0.95:
+        print("Performance Meeting Requirements: Excellent correlation detected.")
 
 if __name__ == "__main__":
-    main()
+    # Example usage:
+    # evaluate_model("checkpoints/fno3d_best.pt", "data/test_set", device="cuda")
+    pass
