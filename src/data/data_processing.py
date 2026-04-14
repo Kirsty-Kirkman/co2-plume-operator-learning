@@ -1,10 +1,41 @@
+import pickle
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
 
-def normalize(data, mean, std):
-    return (data - mean) / (std + 1e-8)
+class Normalizer:
+    def __init__(self):
+        self.stats = {}
+
+    def fit(self, data_map):
+        for key, values in data_map.items():
+            all_vals = np.concatenate(values)
+            self.stats[key] = {
+                "mean": float(np.mean(all_vals)),
+                "std": float(np.std(all_vals)),
+            }
+
+    def normalize(self, key, data):
+        mean = self.stats[key]["mean"]
+        std = self.stats[key]["std"]
+        return (data - mean) / (std + 1e-8)
+
+    def denormalize(self, key, data):
+        mean = self.stats[key]["mean"]
+        std = self.stats[key]["std"]
+        return data * (std + 1e-8) + mean
+
+    def save(self, path):
+        with open(path, "wb") as f:
+            pickle.dump(self.stats, f)
+
+    @classmethod
+    def load(cls, path):
+        obj = cls()
+        with open(path, "rb") as f:
+            obj.stats = pickle.load(f)
+        return obj
 
 
 def resample_2d_z(field, target_z):
@@ -61,9 +92,8 @@ def rescale_perf_interval(perf_interval, old_z, target_z):
 
 def collect_stats(files, target_z=51):
     """
-    Compute mean/std for each required field after resampling to a common grid.
+    Fit a Normalizer on the provided files after resampling to a common Z grid.
     """
-    stats = {}
     keys = [
         "porosity",
         "perm_r",
@@ -79,7 +109,6 @@ def collect_stats(files, target_z=51):
 
     for f in files[:200]:
         with np.load(f) as d:
-            # resample spatial fields
             porosity = resample_2d_z(d["porosity"], target_z)
             perm_r = resample_2d_z(d["perm_r"], target_z)
             perm_z = resample_2d_z(d["perm_z"], target_z)
@@ -90,90 +119,62 @@ def collect_stats(files, target_z=51):
             data_map["perm_z"].append(perm_z.flatten())
             data_map["pressure_buildup"].append(pressure.flatten())
 
-            # scalars
             data_map["inj_rate"].append(np.asarray(d["inj_rate"]).reshape(-1))
             data_map["temperature"].append(np.asarray(d["temperature"]).reshape(-1))
             data_map["depth"].append(np.asarray(d["depth"]).reshape(-1))
             data_map["Swi"].append(np.asarray(d["Swi"]).reshape(-1))
             data_map["lam"].append(np.asarray(d["lam"]).reshape(-1))
 
-    for k in keys:
-        all_vals = np.concatenate(data_map[k])
-        stats[k] = {
-            "mean": np.mean(all_vals),
-            "std": np.std(all_vals),
-        }
-
-    return stats
+    normalizer = Normalizer()
+    normalizer.fit(data_map)
+    return normalizer
 
 
-def load_sample(file_path, stats, target_z=51):
+def load_sample(file_path, normalizer, target_z=51):
     with np.load(file_path) as data:
         old_z, r = data["porosity"].shape
 
-        # Resample spatial fields to common Z resolution
+        # Resample static spatial fields
         porosity_raw = resample_2d_z(data["porosity"], target_z)
         perm_r_raw = resample_2d_z(data["perm_r"], target_z)
         perm_z_raw = resample_2d_z(data["perm_z"], target_z)
 
+        # Resample dynamic targets
         gas_raw = resample_3d_z(data["gas_saturation"], target_z)
         pressure_raw = resample_3d_z(data["pressure_buildup"], target_z)
 
-        # Normalize static fields
-        porosity = normalize(
-            porosity_raw, stats["porosity"]["mean"], stats["porosity"]["std"]
-        )
-        perm_r = normalize(
-            perm_r_raw, stats["perm_r"]["mean"], stats["perm_r"]["std"]
-        )
-        perm_z = normalize(
-            perm_z_raw, stats["perm_z"]["mean"], stats["perm_z"]["std"]
-        )
+        # Normalize static spatial fields
+        porosity = normalizer.normalize("porosity", porosity_raw)
+        perm_r = normalizer.normalize("perm_r", perm_r_raw)
+        perm_z = normalizer.normalize("perm_z", perm_z_raw)
 
-        # Normalize scalars
-        inj_rate = normalize(
-            data["inj_rate"], stats["inj_rate"]["mean"], stats["inj_rate"]["std"]
-        )
-        temperature = normalize(
-            data["temperature"], stats["temperature"]["mean"], stats["temperature"]["std"]
-        )
-        depth = normalize(
-            data["depth"], stats["depth"]["mean"], stats["depth"]["std"]
-        )
-        swi = normalize(
-            data["Swi"], stats["Swi"]["mean"], stats["Swi"]["std"]
-        )
-        lam = normalize(
-            data["lam"], stats["lam"]["mean"], stats["lam"]["std"]
-        )
+        # Normalize scalar parameters
+        inj_rate = normalizer.normalize("inj_rate", np.asarray(data["inj_rate"], dtype=np.float32))
+        temperature = normalizer.normalize("temperature", np.asarray(data["temperature"], dtype=np.float32))
+        depth = normalizer.normalize("depth", np.asarray(data["depth"], dtype=np.float32))
+        swi = normalizer.normalize("Swi", np.asarray(data["Swi"], dtype=np.float32))
+        lam = normalizer.normalize("lam", np.asarray(data["lam"], dtype=np.float32))
 
-        # Targets are [Z, R, T] -> [T, Z, R]
-        gas = np.transpose(gas_raw, (2, 0, 1))
-        pressure = np.transpose(pressure_raw, (2, 0, 1))
-        pressure = normalize(
-            pressure,
-            stats["pressure_buildup"]["mean"],
-            stats["pressure_buildup"]["std"],
-        )
+        # Targets: [Z, R, T] -> [T, Z, R]
+        gas = np.transpose(gas_raw, (2, 0, 1)).astype(np.float32)
+        pressure = np.transpose(pressure_raw, (2, 0, 1)).astype(np.float32)
+        pressure = normalizer.normalize("pressure_buildup", pressure)
 
         T, Z, R = gas.shape
 
-        # Coordinate channels
+        # Coordinates in [-1, 1]
         z_coords = np.linspace(-1.0, 1.0, Z, dtype=np.float32)[:, None]
         r_coords = np.linspace(-1.0, 1.0, R, dtype=np.float32)[None, :]
         z_grid = np.broadcast_to(z_coords, (Z, R))
         r_grid = np.broadcast_to(r_coords, (Z, R))
 
-        # Rescale perforation interval to new Z resolution
+        # Injection source from perf interval, combined with rate
         z_start, z_end = rescale_perf_interval(data["perf_interval"], old_z, target_z)
-
         source = np.zeros((Z, R), dtype=np.float32)
         source[z_start:z_end, 0] = 1.0
-
-        # Combine location and rate
         source_strength = source * np.float32(inj_rate)
 
-        # Broadcast scalar fields
+        # Broadcast scalar parameters to spatial grids
         temperature_grid = np.full((Z, R), temperature, dtype=np.float32)
         depth_grid = np.full((Z, R), depth, dtype=np.float32)
         swi_grid = np.full((Z, R), swi, dtype=np.float32)
@@ -181,7 +182,18 @@ def load_sample(file_path, stats, target_z=51):
 
         time_steps = np.linspace(0.0, 1.0, T, dtype=np.float32)
 
-        # [C, T, Z, R]
+        # Channels:
+        # 0 porosity
+        # 1 perm_r
+        # 2 perm_z
+        # 3 temperature
+        # 4 depth
+        # 5 Swi
+        # 6 lam
+        # 7 r coordinate
+        # 8 z coordinate
+        # 9 source_strength
+        # 10 time
         x = np.zeros((11, T, Z, R), dtype=np.float32)
 
         for t in range(T):
@@ -205,13 +217,13 @@ def load_sample(file_path, stats, target_z=51):
 
 
 class CCSNetDataset(Dataset):
-    def __init__(self, files, stats, target_z=51):
+    def __init__(self, files, normalizer, target_z=51):
         self.files = files
-        self.stats = stats
+        self.normalizer = normalizer
         self.target_z = target_z
 
     def __len__(self):
         return len(self.files)
 
     def __getitem__(self, idx):
-        return load_sample(self.files[idx], self.stats, target_z=self.target_z)
+        return load_sample(self.files[idx], self.normalizer, target_z=self.target_z)

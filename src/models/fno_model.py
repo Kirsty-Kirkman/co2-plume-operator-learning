@@ -16,8 +16,7 @@ class SpectralConv3d(nn.Module):
         self.weights = nn.ParameterList(
             [
                 nn.Parameter(
-                    scale
-                    * torch.randn(
+                    scale * torch.randn(
                         in_channels,
                         out_channels,
                         modes1,
@@ -31,15 +30,10 @@ class SpectralConv3d(nn.Module):
         )
 
     def compl_mul3d(self, input, weights):
-        # input:   [B, in_channels, X, Y, Z]
-        # weights: [in_channels, out_channels, X, Y, Z]
-        # output:  [B, out_channels, X, Y, Z]
         return torch.einsum("bixyz,ioxyz->boxyz", input, weights)
 
     def forward(self, x):
         batchsize = x.shape[0]
-
-        # x: [B, C, T, Z, R]
         x_ft = torch.fft.rfftn(x, dim=[-3, -2, -1])
 
         T = x.size(-3)
