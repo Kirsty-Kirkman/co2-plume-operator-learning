@@ -70,13 +70,28 @@ class SpectralConv3d(nn.Module):
         return torch.fft.irfftn(out_ft, s=(x.size(-3), x.size(-2), x.size(-1)))
 
 
+class FNOBlock3d(nn.Module):
+    def __init__(self, width, modes_t, modes_z, modes_r):
+        super().__init__()
+        self.spectral = SpectralConv3d(width, width, modes_t, modes_z, modes_r)
+        self.bypass = nn.Conv3d(width, width, kernel_size=1)
+        self.norm = nn.BatchNorm3d(width)
+
+    def forward(self, x):
+        x = self.spectral(x) + self.bypass(x)
+        x = self.norm(x)
+        return F.gelu(x)
+
+
 class FNO3d(nn.Module):
-    def __init__(self, in_ch=11, width=32, modes_t=8, modes_z=12, modes_r=12):
+    def __init__(self, in_ch=11, width=48, modes_t=8, modes_z=12, modes_r=12):
         super().__init__()
         self.input_proj = nn.Conv3d(in_ch, width, kernel_size=1)
 
-        self.spectral = SpectralConv3d(width, width, modes_t, modes_z, modes_r)
-        self.bypass = nn.Conv3d(width, width, kernel_size=1)
+        self.block1 = FNOBlock3d(width, modes_t, modes_z, modes_r)
+        self.block2 = FNOBlock3d(width, modes_t, modes_z, modes_r)
+        self.block3 = FNOBlock3d(width, modes_t, modes_z, modes_r)
+        self.block4 = FNOBlock3d(width, modes_t, modes_z, modes_r)
 
         self.gas_head = nn.Sequential(
             nn.Conv3d(width, 128, kernel_size=1),
@@ -93,7 +108,10 @@ class FNO3d(nn.Module):
 
     def forward(self, x):
         x = self.input_proj(x)
-        x = F.gelu(self.spectral(x) + self.bypass(x))
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.block4(x)
         gas = self.gas_head(x)
         pres = self.pres_head(x)
         return gas, pres
