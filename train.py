@@ -81,7 +81,7 @@ def run_epoch(
 
 
 def train():
-    print(">>> DEEPER FNO QUICK OVERFIT SANITY CHECK <<<", flush=True)
+    print(">>> DEEPER FNO 100/20/20 GENERALISATION RUN <<<", flush=True)
 
     torch.manual_seed(0)
     np.random.seed(0)
@@ -96,16 +96,15 @@ def train():
     print(f"Using data path: {data_path}", flush=True)
     print(f"Found {len(all_files)} files", flush=True)
 
-    if len(all_files) < 12:
-        print("Error: Need at least 12 files for 8/2/2 sanity-check split.", flush=True)
+    if len(all_files) < 140:
+        print("Error: Need at least 140 files for 100/20/20 split.", flush=True)
         return
 
     target_z = 51
 
-    # Quick overfit sanity-check split
-    train_files = all_files[:8]
-    val_files = all_files[8:10]
-    test_files = all_files[10:12]
+    train_files = all_files[:100]
+    val_files = all_files[100:120]
+    test_files = all_files[120:140]
 
     print(
         f"Train: {len(train_files)} | Val: {len(val_files)} | Test: {len(test_files)}",
@@ -135,7 +134,7 @@ def train():
 
     model = FNO3d(in_ch=11, width=48).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=15, gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=25, gamma=0.5)
 
     mse_criterion = nn.MSELoss()
     l1_criterion = nn.L1Loss()
@@ -145,7 +144,7 @@ def train():
     pressure_l1_weight = 0.1
 
     print("Starting Training Loop...", flush=True)
-    for epoch in range(1, 31):
+    for epoch in range(1, 101):
         train_metrics = run_epoch(
             model,
             train_loader,
@@ -172,32 +171,33 @@ def train():
 
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
-            torch.save(model.state_dict(), "checkpoints/fno3d_deep_sanity_best.pt")
+            torch.save(model.state_dict(), "checkpoints/fno3d_deep_pressure_best.pt")
             normalizer.save("checkpoints/normalizer.pkl")
             print(f"New best validation model saved at epoch {epoch:03d}", flush=True)
 
-        print(
-            f"Epoch {epoch:03d} | "
-            f"LR: {current_lr:.6e} | "
-            f"Train Loss: {train_metrics['loss']:.6f} | "
-            f"Train Gas R2: {train_metrics['gas_r2']:.4f} | "
-            f"Train Pres R2: {train_metrics['pres_r2']:.4f} | "
-            f"Val Loss: {val_metrics['loss']:.6f} | "
-            f"Val Gas R2: {val_metrics['gas_r2']:.4f} | "
-            f"Val Pres R2: {val_metrics['pres_r2']:.4f}",
-            flush=True,
-        )
+        if epoch % 5 == 0 or epoch == 1:
+            print(
+                f"Epoch {epoch:03d} | "
+                f"LR: {current_lr:.6e} | "
+                f"Train Loss: {train_metrics['loss']:.6f} | "
+                f"Train Gas R2: {train_metrics['gas_r2']:.4f} | "
+                f"Train Pres R2: {train_metrics['pres_r2']:.4f} | "
+                f"Val Loss: {val_metrics['loss']:.6f} | "
+                f"Val Gas R2: {val_metrics['gas_r2']:.4f} | "
+                f"Val Pres R2: {val_metrics['pres_r2']:.4f}",
+                flush=True,
+            )
 
-    torch.save(model.state_dict(), "checkpoints/fno3d_deep_sanity_last.pt")
+    torch.save(model.state_dict(), "checkpoints/fno3d_deep_pressure_last.pt")
     normalizer.save("checkpoints/normalizer.pkl")
 
     print("Training complete.", flush=True)
-    print("Saved best model to checkpoints/fno3d_deep_sanity_best.pt", flush=True)
-    print("Saved last model to checkpoints/fno3d_deep_sanity_last.pt", flush=True)
+    print("Saved best model to checkpoints/fno3d_deep_pressure_best.pt", flush=True)
+    print("Saved last model to checkpoints/fno3d_deep_pressure_last.pt", flush=True)
     print("Saved normalizer to checkpoints/normalizer.pkl", flush=True)
 
     print("Loading best validation checkpoint for test evaluation...", flush=True)
-    model.load_state_dict(torch.load("checkpoints/fno3d_deep_sanity_best.pt", map_location=device))
+    model.load_state_dict(torch.load("checkpoints/fno3d_deep_pressure_best.pt", map_location=device))
 
     test_metrics = run_epoch(
         model,
@@ -211,7 +211,7 @@ def train():
     )
 
     print("--------------", flush=True)
-    print("Sanity-Check Test Results", flush=True)
+    print("Test Set Results", flush=True)
     print("--------------", flush=True)
     print(f"Test Loss:     {test_metrics['loss']:.6f}", flush=True)
     print(f"Test GasLoss:  {test_metrics['gas_loss']:.6f}", flush=True)
