@@ -29,11 +29,7 @@ def run_epoch(
     pressure_l1_weight=0.1,
 ):
     is_train = optimizer is not None
-
-    if is_train:
-        model.train()
-    else:
-        model.eval()
+    model.train() if is_train else model.eval()
 
     total_loss = 0.0
     total_gas_loss = 0.0
@@ -81,7 +77,7 @@ def run_epoch(
 
 
 def train():
-    print(">>> DEEPER FNO 100/20/20 GENERALISATION RUN <<<", flush=True)
+    print(">>> FULL DATASET TRAINING 4000/500 <<<", flush=True)
 
     torch.manual_seed(0)
     np.random.seed(0)
@@ -96,33 +92,41 @@ def train():
     print(f"Using data path: {data_path}", flush=True)
     print(f"Found {len(all_files)} files", flush=True)
 
-    if len(all_files) < 140:
-        print("Error: Need at least 140 files for 100/20/20 split.", flush=True)
+    if len(all_files) < 4500:
+        print("Error: Need at least 4500 training files for 4000/500 split.", flush=True)
         return
 
     target_z = 51
 
-    train_files = all_files[:100]
-    val_files = all_files[100:120]
-    test_files = all_files[120:140]
+    train_files = all_files[:4000]
+    val_files = all_files[4000:4500]
 
     print(
-        f"Train: {len(train_files)} | Val: {len(val_files)} | Test: {len(test_files)}",
+        f"Train: {len(train_files)} | Val: {len(val_files)}",
         flush=True,
     )
     print(f"Resampling all samples to Z = {target_z}", flush=True)
 
     print("Fitting normalizer on training files...", flush=True)
-    normalizer = collect_stats(train_files, target_z=target_z)
+    # Use a subset for stats to keep startup time reasonable
+    normalizer = collect_stats(train_files[:500], target_z=target_z)
     print("Normalizer fitted.", flush=True)
 
     train_dataset = CCSNetDataset(train_files, normalizer=normalizer, target_z=target_z)
     val_dataset = CCSNetDataset(val_files, normalizer=normalizer, target_z=target_z)
-    test_dataset = CCSNetDataset(test_files, normalizer=normalizer, target_z=target_z)
 
-    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0)
-    test_loader = DataLoader(test_dataset, batch_size=2, shuffle=False, num_workers=0)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=2,
+        shuffle=True,
+        num_workers=0,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=2,
+        shuffle=False,
+        num_workers=0,
+    )
 
     sample_x, sample_gas, sample_pres = train_dataset[0]
     print("Sample x shape:", sample_x.shape, flush=True)
@@ -133,8 +137,9 @@ def train():
     print("Sample pres nan?:", torch.isnan(sample_pres).any().item(), flush=True)
 
     model = FNO3d(in_ch=11, width=48).to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=25, gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
     mse_criterion = nn.MSELoss()
     l1_criterion = nn.L1Loss()
@@ -144,7 +149,7 @@ def train():
     pressure_l1_weight = 0.1
 
     print("Starting Training Loop...", flush=True)
-    for epoch in range(1, 101):
+    for epoch in range(1, 41):
         train_metrics = run_epoch(
             model,
             train_loader,
@@ -171,11 +176,11 @@ def train():
 
         if val_metrics["loss"] < best_val_loss:
             best_val_loss = val_metrics["loss"]
-            torch.save(model.state_dict(), "checkpoints/fno3d_deep_pressure_best.pt")
+            torch.save(model.state_dict(), "checkpoints/fno_full_best.pt")
             normalizer.save("checkpoints/normalizer.pkl")
             print(f"New best validation model saved at epoch {epoch:03d}", flush=True)
 
-        if epoch % 5 == 0 or epoch == 1:
+        if epoch % 2 == 0 or epoch == 1:
             print(
                 f"Epoch {epoch:03d} | "
                 f"LR: {current_lr:.6e} | "
@@ -188,36 +193,13 @@ def train():
                 flush=True,
             )
 
-    torch.save(model.state_dict(), "checkpoints/fno3d_deep_pressure_last.pt")
+    torch.save(model.state_dict(), "checkpoints/fno_full_last.pt")
     normalizer.save("checkpoints/normalizer.pkl")
 
     print("Training complete.", flush=True)
-    print("Saved best model to checkpoints/fno3d_deep_pressure_best.pt", flush=True)
-    print("Saved last model to checkpoints/fno3d_deep_pressure_last.pt", flush=True)
+    print("Saved best model to checkpoints/fno_full_best.pt", flush=True)
+    print("Saved last model to checkpoints/fno_full_last.pt", flush=True)
     print("Saved normalizer to checkpoints/normalizer.pkl", flush=True)
-
-    print("Loading best validation checkpoint for test evaluation...", flush=True)
-    model.load_state_dict(torch.load("checkpoints/fno3d_deep_pressure_best.pt", map_location=device))
-
-    test_metrics = run_epoch(
-        model,
-        test_loader,
-        mse_criterion,
-        l1_criterion,
-        device,
-        optimizer=None,
-        pressure_weight=pressure_weight,
-        pressure_l1_weight=pressure_l1_weight,
-    )
-
-    print("--------------", flush=True)
-    print("Test Set Results", flush=True)
-    print("--------------", flush=True)
-    print(f"Test Loss:     {test_metrics['loss']:.6f}", flush=True)
-    print(f"Test GasLoss:  {test_metrics['gas_loss']:.6f}", flush=True)
-    print(f"Test PresLoss: {test_metrics['pres_loss']:.6f}", flush=True)
-    print(f"Test Gas R2:   {test_metrics['gas_r2']:.4f}", flush=True)
-    print(f"Test Pres R2:  {test_metrics['pres_r2']:.4f}", flush=True)
 
 
 if __name__ == "__main__":
