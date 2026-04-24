@@ -81,7 +81,13 @@ def rescale_perf_interval(perf_interval, old_z, target_z):
     return start_scaled, end_scaled
 
 
-def collect_stats(files, target_z=51):
+def collect_stats(files, target_z=51, max_files=None):
+    files = list(files)
+    if max_files is not None:
+        files = files[:max_files]
+    if not files:
+        raise ValueError("collect_stats expected at least one input file.")
+
     keys = [
         "porosity",
         "perm_r",

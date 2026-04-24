@@ -1,5 +1,7 @@
-import os
+import argparse
 import glob
+import os
+
 import numpy as np
 import torch
 
@@ -7,106 +9,141 @@ from src.data.data_processing import CCSNetDataset, Normalizer
 from src.models.fno_model import FNO3d
 
 
-def r2(x, y):
-    x = x.flatten()
-    y = y.flatten()
-
-    x_std = np.std(x, ddof=1)
-    y_std = np.std(y, ddof=1)
-
-    if x_std < 1e-12 or y_std < 1e-12:
-        return 0.0
-
-    zx = (x - np.mean(x)) / x_std
-    zy = (y - np.mean(y)) / y_std
-    r = np.sum(zx * zy) / (len(x) - 1)
-    return r ** 2
+def r2(pred, target):
+    pred = pred.reshape(-1)
+    target = target.reshape(-1)
+    ss_res = np.sum((target - pred) ** 2)
+    ss_tot = np.sum((target - np.mean(target)) ** 2) + 1e-8
+    return 1.0 - (ss_res / ss_tot)
 
 
-def MAE(x, y):
-    x = x.flatten()
-    y = y.flatten()
-    return np.mean(np.abs(x - y))
+def mae(pred, target):
+    pred = pred.reshape(-1)
+    target = target.reshape(-1)
+    return np.mean(np.abs(target - pred))
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate trained 3D FNO model.")
+    parser.add_argument(
+        "--data-path",
+        default=os.getenv("DATA_PATH", "dataset/train_data/*.npz"),
+        help="Glob pattern for evaluation data files.",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default="checkpoints/fno_full_best.pt",
+        help="Path to model checkpoint produced by train.py.",
+    )
+    parser.add_argument(
+        "--normalizer",
+        default="checkpoints/normalizer.pkl",
+        help="Path to normalizer file produced by train.py.",
+    )
+    parser.add_argument("--target-z", type=int, default=51, help="Target Z resolution used in preprocessing.")
+    parser.add_argument("--model-width", type=int, default=48, help="FNO channel width.")
+    parser.add_argument("--modes-t", type=int, default=8, help="FNO Fourier modes along time axis.")
+    parser.add_argument("--modes-z", type=int, default=12, help="FNO Fourier modes along Z axis.")
+    parser.add_argument("--modes-r", type=int, default=12, help="FNO Fourier modes along R axis.")
+    parser.add_argument(
+        "--start-index",
+        type=int,
+        default=4500,
+        help="Starting index in sorted data files for evaluation subset.",
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=100,
+        help="Number of files to evaluate. Use <=0 to evaluate all files from start index.",
+    )
+    return parser.parse_args()
+
+
+def select_eval_files(all_files, start_index, num_samples):
+    start_index = max(0, start_index)
+    if start_index >= len(all_files):
+        return []
+    if num_samples <= 0:
+        return all_files[start_index:]
+    end_index = min(len(all_files), start_index + num_samples)
+    return all_files[start_index:end_index]
 
 
 def evaluate():
+    args = parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Evaluating on device: {device}")
 
-    data_path = os.getenv("DATA_PATH", "dataset/train_data/*.npz")
-    all_files = sorted(glob.glob(data_path))
-    if len(all_files) == 0:
-        print(f"Error: No .npz files found at {data_path}")
-        return
+    all_files = sorted(glob.glob(args.data_path))
+    if not all_files:
+        print(f"Error: no .npz files found at {args.data_path}")
+        return 1
 
-    eval_files = all_files[100:150]
-    if len(eval_files) == 0:
-        print("Error: No evaluation files selected.")
-        return
+    eval_files = select_eval_files(all_files, args.start_index, args.num_samples)
+    if not eval_files:
+        print(
+            f"Error: no evaluation files selected from index {args.start_index}. "
+            f"Found only {len(all_files)} files."
+        )
+        return 1
 
-    print(f"Using {len(eval_files)} unseen files for evaluation.")
+    if not os.path.exists(args.checkpoint):
+        print(f"Error: checkpoint not found: {args.checkpoint}")
+        return 1
 
-    normalizer = Normalizer.load("checkpoints/normalizer.pkl")
+    if not os.path.exists(args.normalizer):
+        print(f"Error: normalizer not found: {args.normalizer}")
+        return 1
 
-    ckpt = "checkpoints/fno3d_generalisation_best.pt"
-    if not os.path.exists(ckpt):
-        ckpt = "checkpoints/fno3d_overfit_best.pt"
+    print(f"Using {len(eval_files)} files for evaluation.")
+    normalizer = Normalizer.load(args.normalizer)
 
-    model = FNO3d(in_ch=11, width=32).to(device)
-    model.load_state_dict(torch.load(ckpt, map_location=device))
+    model = FNO3d(
+        in_ch=11,
+        width=args.model_width,
+        modes_t=args.modes_t,
+        modes_z=args.modes_z,
+        modes_r=args.modes_r,
+    ).to(device)
+    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model.eval()
 
-    gas_saturation_r2 = []
-    pressure_buildup_r2 = []
-    gas_saturation_MAE = []
-    pressure_buildup_MAE = []
+    gas_r2_scores = []
+    pressure_r2_scores = []
+    gas_mae_scores = []
+    pressure_mae_scores = []
 
     for file_path in eval_files:
-        with np.load(file_path) as raw_data:
-            gas_true_raw = raw_data["gas_saturation"].astype(np.float32)
-            pres_true_raw = raw_data["pressure_buildup"].astype(np.float32)
-
-        dataset = CCSNetDataset([file_path], normalizer=normalizer, target_z=51)
-        x, _, pres_true_proc = dataset[0]
+        dataset = CCSNetDataset([file_path], normalizer=normalizer, target_z=args.target_z)
+        x, gas_true, pressure_true = dataset[0]
 
         x = x.unsqueeze(0).to(device)
+        gas_true = gas_true.squeeze(0).numpy()
+        pressure_true = pressure_true.squeeze(0).numpy()
+        pressure_true = normalizer.denormalize("pressure_buildup", pressure_true)
 
         with torch.no_grad():
-            gas_pred, pres_pred = model(x)
+            gas_pred, pressure_pred = model(x)
 
-        gas_pred = gas_pred.squeeze(0).squeeze(0).cpu().numpy()   # [T, Z, R]
-        pres_pred = pres_pred.squeeze(0).squeeze(0).cpu().numpy()
+        gas_pred = gas_pred.squeeze(0).squeeze(0).cpu().numpy()
+        pressure_pred = pressure_pred.squeeze(0).squeeze(0).cpu().numpy()
+        pressure_pred = normalizer.denormalize("pressure_buildup", pressure_pred)
 
-        pres_pred = normalizer.denormalize("pressure_buildup", pres_pred)
-
-        gas_pred = np.transpose(gas_pred, (1, 2, 0))   # [Z, R, T]
-        pres_pred = np.transpose(pres_pred, (1, 2, 0))
-
-        if gas_true_raw.shape != gas_pred.shape or pres_true_raw.shape != pres_pred.shape:
-            dataset = CCSNetDataset([file_path], normalizer=normalizer, target_z=51)
-            _, gas_true_proc, pres_true_proc = dataset[0]
-
-            gas_true_raw = gas_true_proc.squeeze(0).numpy()
-            pres_true_proc = pres_true_proc.squeeze(0).numpy()
-
-            pres_true_proc = normalizer.denormalize("pressure_buildup", pres_true_proc)
-
-            gas_true_raw = np.transpose(gas_true_raw, (1, 2, 0))
-            pres_true_raw = np.transpose(pres_true_proc, (1, 2, 0))
-
-        gas_saturation_r2.append(r2(gas_true_raw, gas_pred))
-        pressure_buildup_r2.append(r2(pres_true_raw, pres_pred))
-
-        gas_saturation_MAE.append(MAE(gas_true_raw, gas_pred))
-        pressure_buildup_MAE.append(MAE(pres_true_raw, pres_pred))
+        gas_r2_scores.append(r2(gas_pred, gas_true))
+        pressure_r2_scores.append(r2(pressure_pred, pressure_true))
+        gas_mae_scores.append(mae(gas_pred, gas_true))
+        pressure_mae_scores.append(mae(pressure_pred, pressure_true))
 
     print("--------------")
-    print(f"Average gas saturation R2: {np.mean(gas_saturation_r2):.6f}")
-    print(f"Average pressure buildup R2: {np.mean(pressure_buildup_r2):.6f}")
+    print(f"Average gas saturation R2: {np.mean(gas_r2_scores):.6f}")
+    print(f"Average pressure buildup R2: {np.mean(pressure_r2_scores):.6f}")
     print("--------------")
-    print(f"Average gas saturation MAE: {np.mean(gas_saturation_MAE):.6f}")
-    print(f"Average pressure buildup MAE: {np.mean(pressure_buildup_MAE):.6f}")
+    print(f"Average gas saturation MAE: {np.mean(gas_mae_scores):.6f}")
+    print(f"Average pressure buildup MAE: {np.mean(pressure_mae_scores):.6f}")
+    return 0
 
 
 if __name__ == "__main__":
-    evaluate()
+    raise SystemExit(evaluate())
