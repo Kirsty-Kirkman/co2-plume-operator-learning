@@ -11,15 +11,7 @@ from torch.utils.data import DataLoader
 
 from src.data.data_processing import CCSNetDataset, collect_stats
 from src.models.fno_model import FNO3d
-
-
-def calculate_r2(pred, target):
-    pred = pred.detach().cpu().numpy().reshape(-1)
-    target = target.detach().cpu().numpy().reshape(-1)
-
-    ss_res = np.sum((target - pred) ** 2)
-    ss_tot = np.sum((target - np.mean(target)) ** 2) + 1e-8
-    return 1.0 - (ss_res / ss_tot)
+from src.utils.metrics import r2_score
 
 
 def run_epoch(
@@ -67,8 +59,8 @@ def run_epoch(
         total_loss += loss.item()
         total_gas_loss += gas_loss.item()
         total_pres_loss += pres_loss.item()
-        total_gas_r2 += calculate_r2(gas_pred, gas_true)
-        total_pres_r2 += calculate_r2(pres_pred, pres_true)
+        total_gas_r2 += r2_score(gas_pred, gas_true)
+        total_pres_r2 += r2_score(pres_pred, pres_true)
 
     n = len(loader)
     if n == 0:
@@ -153,6 +145,8 @@ def train():
 
     train_files = all_files[split_start:train_end]
     val_files = all_files[train_end:val_end]
+    train_file_names = [Path(f).name for f in train_files]
+    val_file_names = [Path(f).name for f in val_files]
 
     print(
         f"Train: {len(train_files)} | Val: {len(val_files)} | Target Z: {args.target_z}",
@@ -221,6 +215,19 @@ def train():
     with config_path.open("w", encoding="utf-8") as f:
         json.dump(config_payload, f, indent=2)
     print(f"Saved training config to {config_path}", flush=True)
+
+    split_manifest_path = checkpoint_dir / "split_manifest.json"
+    split_manifest = {
+        "data_path": args.data_path,
+        "split_offset": split_start,
+        "train_size": len(train_files),
+        "val_size": len(val_files),
+        "train_files": train_file_names,
+        "val_files": val_file_names,
+    }
+    with split_manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(split_manifest, f, indent=2)
+    print(f"Saved split manifest to {split_manifest_path}", flush=True)
 
     print("Starting Training Loop...", flush=True)
     for epoch in range(1, args.epochs + 1):

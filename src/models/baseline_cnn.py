@@ -17,7 +17,7 @@ class BaselineCNN(nn.Module):
         pressure: (batch, 24, nz, nx)
     """
 
-    def __init__(self, in_ch=9, hidden=64):
+    def __init__(self, in_ch=11, hidden=64):
         super().__init__()
 
         # Shared feature extractor
@@ -66,6 +66,18 @@ class BaselineCNN(nn.Module):
         pressure : torch.Tensor
             Predicted pressure buildup with shape (batch, 24, nz, nx)
         """
+        if x.ndim != 4:
+            raise ValueError(
+                "BaselineCNN expects input shape (batch, channels, nz, nx). "
+                f"Received tensor with shape {tuple(x.shape)}."
+            )
+
+        expected_channels = self.encoder[0].in_channels
+        if x.shape[1] != expected_channels:
+            raise ValueError(
+                f"BaselineCNN expected {expected_channels} input channels, got {x.shape[1]}."
+            )
+
         features = self.encoder(x)
 
         gas = self.gas_head(features)

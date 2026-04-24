@@ -1,33 +1,31 @@
 import argparse
 import glob
+import json
 import os
+from pathlib import Path
 
 import numpy as np
 import torch
 
 from src.data.data_processing import CCSNetDataset, Normalizer
 from src.models.fno_model import FNO3d
+from src.utils.metrics import mae_score, r2_score
 
 
-def r2(pred, target):
-    pred = pred.reshape(-1)
-    target = target.reshape(-1)
-    ss_res = np.sum((target - pred) ** 2)
-    ss_tot = np.sum((target - np.mean(target)) ** 2) + 1e-8
-    return 1.0 - (ss_res / ss_tot)
-
-
-def mae(pred, target):
-    pred = pred.reshape(-1)
-    target = target.reshape(-1)
-    return np.mean(np.abs(target - pred))
+MODEL_DEFAULTS = {
+    "target_z": 51,
+    "model_width": 48,
+    "modes_t": 8,
+    "modes_z": 12,
+    "modes_r": 12,
+}
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate trained 3D FNO model.")
     parser.add_argument(
         "--data-path",
-        default=os.getenv("DATA_PATH", "dataset/train_data/*.npz"),
+        default=os.getenv("DATA_PATH", "dataset/test_data/*.npz"),
         help="Glob pattern for evaluation data files.",
     )
     parser.add_argument(
@@ -48,14 +46,34 @@ def parse_args():
     parser.add_argument(
         "--start-index",
         type=int,
-        default=4500,
+        default=0,
         help="Starting index in sorted data files for evaluation subset.",
     )
     parser.add_argument(
         "--num-samples",
         type=int,
-        default=100,
+        default=0,
         help="Number of files to evaluate. Use <=0 to evaluate all files from start index.",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to training config JSON. Defaults to <checkpoint_dir>/train_config.json.",
+    )
+    parser.add_argument(
+        "--split-manifest",
+        default=None,
+        help="Path to split manifest JSON. Defaults to <checkpoint_dir>/split_manifest.json.",
+    )
+    parser.add_argument(
+        "--allow-overlap",
+        action="store_true",
+        help="Allow evaluation files to overlap with train/val split manifest.",
+    )
+    parser.add_argument(
+        "--allow-config-override",
+        action="store_true",
+        help="Allow CLI model settings to differ from train_config.json values.",
     )
     return parser.parse_args()
 
@@ -68,6 +86,49 @@ def select_eval_files(all_files, start_index, num_samples):
         return all_files[start_index:]
     end_index = min(len(all_files), start_index + num_samples)
     return all_files[start_index:end_index]
+
+
+def load_json(path):
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def resolve_config_path(args):
+    if args.config:
+        return Path(args.config)
+    return Path(args.checkpoint).resolve().parent / "train_config.json"
+
+
+def resolve_split_manifest_path(args):
+    if args.split_manifest:
+        return Path(args.split_manifest)
+    return Path(args.checkpoint).resolve().parent / "split_manifest.json"
+
+
+def apply_training_config(args, train_config):
+    for key, default_value in MODEL_DEFAULTS.items():
+        if key not in train_config:
+            continue
+
+        cfg_value = train_config[key]
+        current_value = getattr(args, key)
+
+        if current_value == default_value:
+            setattr(args, key, cfg_value)
+            continue
+
+        if current_value != cfg_value and not args.allow_config_override:
+            raise ValueError(
+                f"Model setting '{key}' mismatch: eval={current_value}, train={cfg_value}. "
+                "Pass --allow-config-override to force evaluation with mismatched settings."
+            )
+
+
+def find_overlap(eval_files, split_manifest):
+    eval_names = {Path(f).name for f in eval_files}
+    train_names = set(split_manifest.get("train_files", []))
+    val_names = set(split_manifest.get("val_files", []))
+    return sorted(eval_names & (train_names | val_names))
 
 
 def evaluate():
@@ -97,7 +158,55 @@ def evaluate():
         print(f"Error: normalizer not found: {args.normalizer}")
         return 1
 
+    config_path = resolve_config_path(args)
+    if config_path.exists():
+        try:
+            train_config = load_json(config_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Error: failed to load training config at {config_path}: {exc}")
+            return 1
+
+        try:
+            apply_training_config(args, train_config)
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        print(f"Loaded training config from {config_path}")
+    else:
+        print(f"Warning: training config not found at {config_path}; using CLI/default model settings.")
+
     print(f"Using {len(eval_files)} files for evaluation.")
+
+    split_manifest_path = resolve_split_manifest_path(args)
+    if split_manifest_path.exists():
+        try:
+            split_manifest = load_json(split_manifest_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Error: failed to load split manifest at {split_manifest_path}: {exc}")
+            return 1
+
+        overlap = find_overlap(eval_files, split_manifest)
+        if overlap:
+            preview = ", ".join(overlap[:10])
+            if len(overlap) > 10:
+                preview = f"{preview}, ..."
+            msg = f"Detected {len(overlap)} eval files overlapping train/val split: {preview}"
+            if args.allow_overlap:
+                print(f"Warning: {msg}")
+            else:
+                print(f"Error: {msg}")
+                print("Use --allow-overlap to bypass this safety check.")
+                return 1
+        else:
+            print(f"Verified no train/val overlap using {split_manifest_path}")
+    elif args.allow_overlap:
+        print(f"Warning: split manifest not found at {split_manifest_path}; skipping overlap check.")
+    else:
+        print(f"Error: split manifest not found at {split_manifest_path}")
+        print("Run train.py to generate split_manifest.json, or pass --allow-overlap to bypass.")
+        return 1
+
     normalizer = Normalizer.load(args.normalizer)
 
     model = FNO3d(
@@ -131,10 +240,10 @@ def evaluate():
         pressure_pred = pressure_pred.squeeze(0).squeeze(0).cpu().numpy()
         pressure_pred = normalizer.denormalize("pressure_buildup", pressure_pred)
 
-        gas_r2_scores.append(r2(gas_pred, gas_true))
-        pressure_r2_scores.append(r2(pressure_pred, pressure_true))
-        gas_mae_scores.append(mae(gas_pred, gas_true))
-        pressure_mae_scores.append(mae(pressure_pred, pressure_true))
+        gas_r2_scores.append(r2_score(gas_pred, gas_true))
+        pressure_r2_scores.append(r2_score(pressure_pred, pressure_true))
+        gas_mae_scores.append(mae_score(gas_pred, gas_true))
+        pressure_mae_scores.append(mae_score(pressure_pred, pressure_true))
 
     print("--------------")
     print(f"Average gas saturation R2: {np.mean(gas_r2_scores):.6f}")

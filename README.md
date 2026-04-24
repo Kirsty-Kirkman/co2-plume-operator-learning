@@ -37,7 +37,8 @@ Scripts expect `.npz` files with fields used by `src/data/data_processing.py` (f
 Default data glob:
 
 ```text
-dataset/train_data/*.npz
+train.py  -> dataset/train_data/*.npz
+evaluate.py -> dataset/test_data/*.npz
 ```
 
 You can override this in each script with `--data-path` or `DATA_PATH`.
@@ -53,7 +54,7 @@ python train.py --data-path "dataset/train_data/*.npz"
 Evaluate a checkpoint (default checkpoint: `checkpoints/fno_full_best.pt`):
 
 ```bash
-python evaluate.py --data-path "dataset/train_data/*.npz" --start-index 4500 --num-samples 100
+python evaluate.py --data-path "dataset/test_data/*.npz" --start-index 0 --num-samples 0
 ```
 
 Run short smoke test (auto: real data if available, else synthetic):
@@ -69,7 +70,25 @@ python test_run.py --mode auto
   - `checkpoints/fno_full_last.pt`
   - `checkpoints/normalizer.pkl`
   - `checkpoints/train_config.json`
-- `evaluate.py` expects checkpoint architecture arguments to match training settings.
+  - `checkpoints/split_manifest.json`
+- `evaluate.py` auto-loads `train_config.json` from the checkpoint directory by default.
+- `evaluate.py` blocks train/val overlap by default using `split_manifest.json`.
+
+## Phase 1 Verification
+
+```bash
+# 1) Smoke test
+python test_run.py --mode auto
+
+# 2) Tiny end-to-end train
+python train.py --data-path "dataset/train_data/*.npz" --train-size 64 --val-size 16 --epochs 2 --checkpoint-dir "checkpoints/smoke"
+
+# 3) Tiny evaluation on held-out test data
+python evaluate.py --data-path "dataset/test_data/*.npz" --checkpoint "checkpoints/smoke/fno_full_best.pt" --normalizer "checkpoints/smoke/normalizer.pkl" --start-index 0 --num-samples 32
+
+# 4) Optional: bypass overlap guard for legacy checkpoints without split manifest
+python evaluate.py --checkpoint "<legacy_checkpoint.pt>" --normalizer "<matching_normalizer.pkl>" --data-path "dataset/test_data/*.npz" --allow-overlap
+```
 
 ## Planned Improvements
 
